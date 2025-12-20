@@ -225,6 +225,7 @@ def optical_flow(im1, im2, step_size, border_cut):
 def stabilize_video(frames, step_size, win_size):
     """
     Stabilizes a video sequence by keeping only horizontal motion.
+    Based on instruction 2b: "only horizontal motion".
 
     Args:
         frames: List or Array of grayscale images (N, H, W).
@@ -232,50 +233,50 @@ def stabilize_video(frames, step_size, win_size):
         win_size: Parameter for optical_flow window.
 
     Returns:
-        stabilized_frames: List of warped images.
+        stabilized_frames: List of warped images (same length as input).
     """
     stabilized_frames = []
 
-    # 1. Initialize Cumulative corrections
-    # We treat the first frame as the anchor (0,0,0)
-    current_x = 0.0
-    current_y = 0.0
-    current_theta = 0.0
+    # 1. Initialize Cumulative Path (Drift)
+    # We assume the first frame is the anchor (0,0,0)
+    current_y_drift = 0.0
+    current_theta_drift = 0.0
 
-    # Add first frame as is (it's the reference)
+    # The first frame is already "stable" relative to itself
     stabilized_frames.append(frames[0])
 
-    # 2. Loop over frames
+    # 2. Iterate through the video
     for i in range(len(frames) - 1):
         im1 = frames[i]
         im2 = frames[i + 1]
 
-        # A. Find motion between im1 and im2
+        # A. Calculate motion between consecutive frames (Chain Step)
+        # u: dx, v: dy, theta: d_theta
         u, v, theta = optical_flow(im1, im2, step_size, win_size)
 
-        # B. Update "Where am I currently?" (Cumulative Path)
-        current_x += u
-        current_y += v
-        current_theta += theta
+        # B. Accumulate the vertical and rotational drift
+        # Note: We do NOT accumulate 'u' (x) because we WANT horizontal motion.
+        # We track 'v' and 'theta' to know how much we deviated from the "rail".
+        current_y_drift += v
+        current_theta_drift += theta
 
-        # C. Define Correction
-        # We want to cancel out the drift in Y and Theta relative to the START.
-        # So we want to bring the CURRENT frame (im2) back to y=0, theta=0.
-        # FIX: We are warping im2. Its current absolute position is (current_y, current_theta).
-        # To fix it, we need to shift by -current_y and rotate by -current_theta.
+        # C. Fix the current frame (im2)
+        # To stabilize, we want to bring im2 back to y=0 and theta=0 (relative to start),
+        # but keep its x-position as is.
+        # So we warp it by the INVERSE of the accumulated drift.
 
-        fix_u = 0  # Keep horizontal motion (don't fix x)
-        fix_v = -current_y  # Cancel vertical drift
-        fix_theta = -current_theta  # Cancel rotation drift
+        fix_u = 0.0  # Do not touch horizontal movement
+        fix_v = -current_y_drift  # Cancel total vertical drift
+        fix_theta = -current_theta_drift  # Cancel total rotation
 
-        # D. Warp
-        # Note: warp_image usually takes "inverse" mapping or "shift amount".
-        # Make sure your warp_image handles these parameters correctly to "undo" the motion.
+        # D. Apply Warp
+        # warp_image expects (u, v, theta) as the "shift to apply".
         warped_frame = warp_image(im2, fix_u, fix_v, fix_theta)
 
         stabilized_frames.append(warped_frame)
 
+        # Optional: Print progress
         print(
-            f"Frame {i + 1}: Motion=({u:.2f}, {v:.2f}), Correction=({fix_v:.2f}, {fix_theta:.2f})")
+            f"Frame {i + 1}/{len(frames) - 1}: Correction applied (dy={fix_v:.2f}, dth={np.rad2deg(fix_theta):.2f}°)")
 
     return stabilized_frames
