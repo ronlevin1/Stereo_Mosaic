@@ -254,20 +254,14 @@ def stabilize_video(frames, step_size, win_size):
         # u: dx, v: dy, theta: d_theta
         u, v, theta = optical_flow(im1, im2, step_size, win_size)
 
-        # B. Accumulate the vertical and rotational drift
-        # Note: We do NOT accumulate 'u' (x) because we WANT horizontal motion.
-        # We track 'v' and 'theta' to know how much we deviated from the "rail".
+        # B. Accumulate the vertical and rotational drift (relative to first frame)
         current_y_drift += v
         current_theta_drift += theta
 
         # C. Fix the current frame (im2)
-        # To stabilize, we want to bring im2 back to y=0 and theta=0 (relative to start),
-        # but keep its x-position as is.
-        # So we warp it by the INVERSE of the accumulated drift.
-
         fix_u = 0.0  # Do not touch horizontal movement
-        fix_v = -current_y_drift  # Cancel total vertical drift
-        fix_theta = -current_theta_drift  # Cancel total rotation
+        fix_v = current_y_drift  # Cancel total vertical drift
+        fix_theta = current_theta_drift  # Cancel total rotation
 
         # D. Apply Warp
         # warp_image expects (u, v, theta) as the "shift to apply".
@@ -275,7 +269,7 @@ def stabilize_video(frames, step_size, win_size):
 
         stabilized_frames.append(warped_frame)
 
-        # Optional: Print progress
+        # TODO - Optional: Print progress
         print(
             f"Frame {i + 1}/{len(frames) - 1}: Correction applied (dy={fix_v:.2f}, dth={np.rad2deg(fix_theta):.2f}°)")
 
