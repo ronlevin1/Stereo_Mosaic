@@ -4,77 +4,80 @@ from scipy.signal import convolve2d
 from scipy.ndimage import map_coordinates
 import imageio
 from skimage.color import rgb2gray
-#TODO: import pyramid functions from ex3
 
-def lucas_kanade_step(I1, I2, window_size):
+
+# TODO: import pyramid functions from ex3
+
+def lucas_kanade_step(I1, I2, border_cut):
     """
-    Computes the optical flow (u, v) between two images using the Lucas-Kanade method.
+    Computes the Rigid Optical Flow (u, v, theta) between two images.
+    Assumes the motion is a combination of translation and rotation.
 
     Args:
-        I1: First image (numpy array).
-        I2: Second image (numpy array).
-        window_size: The number of pixels to discard from the borders.
+        I1: First image.
+        I2: Second image.
+        border_cut: Pixels to discard from borders (formerly window_size).
 
     Returns:
-        (u, v): The translation vector.
+        (u, v, theta): Translation and Rotation parameters.
     """
+    # 1. Compute Derivatives (same as before)
+    # Remember to divide by 2 for correct scale!
+    kernel_x = np.array([[1, 0, -1]]) / 2.0
+    kernel_y = kernel_x.T
 
-    # 1. Compute gradients Ix, Iy
-    # Kernel for x-derivative: [1, 0, -1]
-    kernel_x = np.array([[1, 0, -1]])
-    kernel_y = kernel_x.T  # Transpose for y-derivative
-
-    # mode='same' keeps the output size equal to input size
-    # boundary='symm' helps reducing artifacts at borders
     Ix = signal.convolve2d(I1, kernel_x, mode='same', boundary='symm')
     Iy = signal.convolve2d(I1, kernel_y, mode='same', boundary='symm')
-
-    # 2. Compute temporal derivative It
-    # It represents how much the intensity changed over time (between frames)
     It = I2 - I1
 
-    # 3. Handle Borders (Windowing)
-    # We discard pixels near the border because convolution is not valid there,
-    # and to satisfy the assumption that the window moves together.
-    w = window_size
-    # Slice format: [start:end, start:end]
-    Ix = Ix[w:-w, w:-w]
-    Iy = Iy[w:-w, w:-w]
-    It = It[w:-w, w:-w]
+    # 2. Create Coordinate Grid (x, y) relative to image center
+    # Rotation happens around the center, so (0,0) must be in the middle.
+    h, w = I1.shape
+    y, x = np.mgrid[0:h, 0:w]
 
-    # 4. Build the Lucas-Kanade Matrix Equation: A * [u, v] = b
-    # A = [[sum(Ix^2), sum(Ix*Iy)],
-    #      [sum(Ix*Iy), sum(Iy^2)]]
+    # Shift origin to center
+    x = x - w // 2
+    y = y - h // 2
 
-    Sigma_Ix2 = np.sum(Ix ** 2)
-    Sigma_Iy2 = np.sum(Iy ** 2)
-    Sigma_IxIy = np.sum(Ix * Iy)
+    # 3. Compute the "Angular Derivative" I_theta
+    # From the equation: u*Ix + v*Iy + theta*(x*Iy - y*Ix) = -It
+    # So the coefficient for theta is (x*Iy - y*Ix)
+    # New: I_theta = y * Ix - x * Iy  (Matches image coordinate rotation)
+    I_theta = y * Ix - x * Iy
 
-    A = np.array([[Sigma_Ix2, Sigma_IxIy],
-                  [Sigma_IxIy, Sigma_Iy2]])
+    # 4. Handle Borders (Slice everything)
+    b = border_cut
+    Ix = Ix[b:-b, b:-b]
+    Iy = Iy[b:-b, b:-b]
+    I_theta = I_theta[b:-b, b:-b]
+    It = It[b:-b, b:-b]
 
-    # b = [[-sum(Ix*It)],
-    #      [-sum(Iy*It)]]
+    # 5. Build the 3x3 Matrix equation: A * [u, v, theta] = B
 
-    Sigma_IxIt = np.sum(Ix * It)
-    Sigma_IyIt = np.sum(Iy * It)
+    Ix2 = np.sum(Ix ** 2)
+    Iy2 = np.sum(Iy ** 2)
+    IxIy = np.sum(Ix * Iy)
 
-    b = np.array([[-Sigma_IxIt],
-                  [-Sigma_IyIt]])
+    IxIth = np.sum(Ix * I_theta)
+    IyIth = np.sum(Iy * I_theta)
+    Ith2 = np.sum(I_theta ** 2)
 
-    # 5. Solve for (u, v)
-    # We use pseudo-inverse or solve to handle singular matrices gracefully
-    # If the matrix is singular (e.g., flat image with no edges), we cannot detect motion.
+    A = np.array([
+        [Ix2, IxIy, IxIth],
+        [IxIy, Iy2, IyIth],
+        [IxIth, IyIth, Ith2]
+    ])
+
+    # B vector
+    IxIt = np.sum(Ix * It)
+    IyIt = np.sum(Iy * It)
+    IthIt = np.sum(I_theta * It)
+
+    B = np.array([[-IxIt], [-IyIt], [-IthIt]])
+
+    # 6. Solve
     try:
-        # np.linalg.solve is numerically more stable than inv(A) @ b
-        # However, checking eigenvalues is the robust way to ensure non-singularity.
-        # For this exercise, simple exception handling or pinv is usually sufficient.
-
-        # Check if matrix is invertible (det != 0) is risky with floats.
-        # Let's try to solve it.
-        u, v = np.linalg.solve(A, b).flatten()
-        return u, v
-
+        res = np.linalg.solve(A, B).flatten()
+        return res[0], res[1], res[2]  # u, v, theta
     except np.linalg.LinAlgError:
-        # Matrix is singular (e.g., blank image or aperture problem)
-        return 0.0, 0.0
+        return 0.0, 0.0, 0.0
