@@ -423,50 +423,207 @@ def warp_global(image, T_inv, canvas_shape):
     return warped_image
 
 
+#todo: delete later
 def create_panorama(frames, step_size, border_cut):
     """
-    Creates a panoramic mosaic by stitching all frames together (Step 3b).
-    Naive implementation: Pastes frames on top of each other.
+    Creates a panoramic mosaic (Step 3b) by pasting frames.
+    Fixes the 'black border overwrite' issue by treating black pixels as transparent.
     """
     print("Calculating canvas limits...")
-    # 1. Calculate limits and all global transforms
-    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
-        frames, step_size, border_cut)
+    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(frames, step_size, border_cut)
 
     H_canvas, W_canvas = canvas_shape
     print(f"Canvas Size: {W_canvas}x{H_canvas}")
 
-    # 2. Initialize Panorama (Black canvas)
     panorama = np.zeros((H_canvas, W_canvas))
 
-    # 3. Create Offset Matrix
-    # This shifts (0,0) to (offset_x, offset_y) so everything fits
     T_offset = np.eye(3)
-    T_offset[0, 2] = offset_x  # x translation
-    T_offset[1, 2] = offset_y  # y translation
+    T_offset[0, 2] = offset_x
+    T_offset[1, 2] = offset_y
+
+    h_img, w_img = frames[0].shape
+
+    # Pre-define corners for ROI calculation
+    corners = np.array([[0, 0, 1], [w_img, 0, 1], [w_img, h_img, 1], [0, h_img, 1]]).T
 
     print("Stitching frames...")
 
     for i, frame in enumerate(frames):
-        # A. Calculate the Total Transform (Frame -> Canvas)
-        # T_rel maps Frame -> Global(0,0)
-        # T_offset maps Global(0,0) -> Canvas(positive coords)
-        T_rel = abs_transforms[i]
-        T_total = T_offset @ T_rel
-
-        # B. We need the Inverse for warping (Canvas -> Frame)
+        # 1. Transform setup
+        T_total = T_offset @ abs_transforms[i]
         T_inv = np.linalg.inv(T_total)
 
-        # C. Warp the current frame onto the canvas
-        warped_frame = warp_global(frame, T_inv, (H_canvas, W_canvas))
+        # 2. Calculate ROI (Bounding Box on Canvas)
+        warped_corners = T_total @ corners
+        warped_corners = warped_corners / warped_corners[2, :]
 
-        # D. Paste onto panorama
-        # np.maximum allows us to overlay the image w/o overwriting pixels with black borders.
-        panorama = np.maximum(panorama, warped_frame)
-        # panorama += warped_frame  # Alternative: simple addition (may cause brightness issues)
+        min_x = int(np.floor(warped_corners[0, :].min()))
+        max_x = int(np.ceil(warped_corners[0, :].max()))
+        min_y = int(np.floor(warped_corners[1, :].min()))
+        max_y = int(np.ceil(warped_corners[1, :].max()))
 
-        # Progress log
-        if i % 5 == 0 or i == len(frames) - 1:
-            print(f"Pasted frame {i + 1}/{len(frames)}")
+        # Clip to canvas
+        min_x, max_x = max(0, min_x), min(W_canvas, max_x)
+        min_y, max_y = max(0, min_y), min(H_canvas, max_y)
+
+        if max_x <= min_x or max_y <= min_y:
+            continue
+
+        # 3. Create Grid for ROI
+        x_range = np.arange(min_x, max_x)
+        y_range = np.arange(min_y, max_y)
+        xv, yv = np.meshgrid(x_range, y_range)
+        coords_roi = np.stack([xv, yv, np.ones_like(xv)]).reshape(3, -1)
+
+        # 4. Back-Warp
+        src_coords = T_inv @ coords_roi
+        src_coords = src_coords / src_coords[2, :]
+
+        src_x = src_coords[0, :]
+        src_y = src_coords[1, :]
+
+        # 5. Mask 1: Geometric Validity (Inside original frame boundaries)
+        is_valid_x = (src_x >= 0) & (src_x <= w_img - 1)
+        is_valid_y = (src_y >= 0) & (src_y <= h_img - 1)
+        geo_mask = is_valid_x & is_valid_y
+
+        if not np.any(geo_mask):
+            continue
+
+        # 6. Sample Colors
+        roi_h, roi_w = max_y - min_y, max_x - min_x
+        src_x_grid = src_x.reshape(roi_h, roi_w)
+        src_y_grid = src_y.reshape(roi_h, roi_w)
+        mask_grid = geo_mask.reshape(roi_h, roi_w)
+
+        # Use simple interpolation
+        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1, prefilter=False)
+
+        # 7. Mask 2: Content Validity (Ignore black pixels from generator padding)
+        # We only paste if the NEW pixel is not black.
+        # This treats the generator's black borders as transparent.
+        content_mask = new_vals > 1e-5  # Threshold for "not black"
+
+        # Combine masks: Must be inside frame AND not be a black border pixel
+        final_mask = mask_grid & content_mask
+
+        # 8. Paste
+        pan_slice = panorama[min_y:max_y, min_x:max_x]
+        pan_slice[final_mask] = new_vals[final_mask]
+        panorama[min_y:max_y, min_x:max_x] = pan_slice
+
+        if i % 5 == 0 or i == len(frames)-1:
+            print(f"Pasted frame {i+1}/{len(frames)}")
+
+    return panorama
+
+def create_mosaic(frames, step_size, border_cut):
+    """
+    Creates a panorama using the Strips method (Section 4).
+    Instead of pasting the whole frame, we paste a vertical strip
+    from the center of each frame.
+    """
+    print("Calculating canvas limits...")
+    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(frames, step_size, border_cut)
+
+    H_canvas, W_canvas = canvas_shape
+    print(f"Canvas Size: {W_canvas}x{H_canvas}")
+
+    panorama = np.zeros((H_canvas, W_canvas))
+
+    T_offset = np.eye(3)
+    T_offset[0, 2] = offset_x
+    T_offset[1, 2] = offset_y
+
+    h_img, w_img = frames[0].shape
+
+    # --- STRIP CALCULATION ---
+    # We need to decide the width of the strip.
+    # In a perfect uniform motion (like the synthetic video), strip width = dx.
+    # We can estimate the average motion from the last frame's position.
+
+    # Total x-movement / number of steps
+    last_T = abs_transforms[-1]
+    total_dx = last_T[0, 2] # The x-translation component
+    avg_dx = total_dx / (len(frames) - 1)
+    buffer = 4  # Extra pixels to avoid gaps
+    strip_width = int(np.round(avg_dx)) + buffer
+    strip_width = max(1, strip_width) # Safety
+
+    print(f"Detected average motion: {avg_dx:.2f} px. Using strip width: {strip_width}")
+
+    # Define the strip boundaries in the SOURCE image coordinates.
+    # We take the strip from the center of the image.
+    strip_start_x = (w_img // 2) - (strip_width // 2)
+    strip_end_x = strip_start_x + strip_width
+
+    # Define corners of the STRIP (not the whole image)
+    # This is the "cookie cutter" we will map to the canvas.
+    strip_corners = np.array([
+        [strip_start_x, 0, 1],
+        [strip_end_x,   0, 1],
+        [strip_end_x,   h_img, 1],
+        [strip_start_x, h_img, 1]
+    ]).T
+
+    print("Stitching strips...")
+
+    for i, frame in enumerate(frames):
+        # 1. Transform setup
+        T_total = T_offset @ abs_transforms[i]
+        T_inv = np.linalg.inv(T_total)
+
+        # 2. Where does the STRIP land on the canvas?
+        warped_corners = T_total @ strip_corners
+        warped_corners = warped_corners / warped_corners[2, :]
+
+        # Bounding box of the STRIP on the canvas
+        min_x = int(np.floor(warped_corners[0, :].min()))
+        max_x = int(np.ceil(warped_corners[0, :].max()))
+        min_y = int(np.floor(warped_corners[1, :].min()))
+        max_y = int(np.ceil(warped_corners[1, :].max()))
+
+        # Clip to canvas
+        min_x, max_x = max(0, min_x), min(W_canvas, max_x)
+        min_y, max_y = max(0, min_y), min(H_canvas, max_y)
+
+        if max_x <= min_x or max_y <= min_y:
+            continue
+
+        # 3. Create Grid for ROI
+        x_range = np.arange(min_x, max_x)
+        y_range = np.arange(min_y, max_y)
+        xv, yv = np.meshgrid(x_range, y_range)
+        coords_roi = np.stack([xv, yv, np.ones_like(xv)]).reshape(3, -1)
+
+        # 4. Back-Warp
+        src_coords = T_inv @ coords_roi
+        src_coords = src_coords / src_coords[2, :]
+        src_x = src_coords[0, :]
+        src_y = src_coords[1, :]
+
+        # 5. Mask: Only geometric validity!
+        # NO NEED for content check (black pixels) because we are in the center of the frame!
+        is_valid_x = (src_x >= 0) & (src_x <= w_img - 1)
+        is_valid_y = (src_y >= 0) & (src_y <= h_img - 1)
+        valid_mask = is_valid_x & is_valid_y
+
+        if not np.any(valid_mask):
+            continue
+
+        # 6. Sample & Paste
+        roi_h, roi_w = max_y - min_y, max_x - min_x
+        src_x_grid = src_x.reshape(roi_h, roi_w)
+        src_y_grid = src_y.reshape(roi_h, roi_w)
+        mask_grid = valid_mask.reshape(roi_h, roi_w)
+
+        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1, prefilter=False)
+
+        pan_slice = panorama[min_y:max_y, min_x:max_x]
+        pan_slice[mask_grid] = new_vals[mask_grid]
+        panorama[min_y:max_y, min_x:max_x] = pan_slice
+
+        if i % 5 == 0:
+            print(f"Pasted strip {i}/{len(frames)}")
 
     return panorama
