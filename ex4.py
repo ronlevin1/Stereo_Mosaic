@@ -50,9 +50,11 @@ def gaussian_pyramid(img, num_of_levels):
 
     return pyramid
 
+
 "------------------------------------------------------------------------------"
 "-------------------------- Translation calc logic ----------------------------"
 "------------------------------------------------------------------------------"
+
 
 def lucas_kanade_step(I1, I2, border_cut):
     """
@@ -225,7 +227,7 @@ def optical_flow(im1, im2, step_size, border_cut):
     return u, v, theta
 
 
-def stabilize_video(frames, step_size, win_size):
+def stabilize_video(frames, step_size, border_cut):
     """
     Stabilizes a video sequence by keeping only horizontal motion.
     Based on instruction 2b: "only horizontal motion".
@@ -233,7 +235,7 @@ def stabilize_video(frames, step_size, win_size):
     Args:
         frames: List or Array of grayscale images (N, H, W).
         step_size: Parameter for optical_flow pyramids.
-        win_size: Parameter for optical_flow window.
+        border_cut: Parameter for optical_flow window.
 
     Returns:
         stabilized_frames: List of warped images (same length as input).
@@ -253,9 +255,9 @@ def stabilize_video(frames, step_size, win_size):
         im1 = frames[i]
         im2 = frames[i + 1]
 
-        # A. Calculate motion between consecutive frames (Chain Step)
+        # A. Calculate motion between consecutive original_frames (Chain Step)
         # u: dx, v: dy, theta: d_theta
-        u, v, theta = optical_flow(im1, im2, step_size, win_size)
+        u, v, theta = optical_flow(im1, im2, step_size, border_cut)
 
         # B. Accumulate the vertical and rotational drift (relative to first frame)
         current_y_drift += v
@@ -277,3 +279,98 @@ def stabilize_video(frames, step_size, win_size):
             f"Frame {i + 1}/{len(frames) - 1}: Correction applied (dy={fix_v:.2f}, dth={np.rad2deg(fix_theta):.2f}°)")
 
     return stabilized_frames
+
+
+def build_matrix(u, v, theta):
+    """
+    Creates a 3x3 Rigid transformation matrix from u, v, theta.
+    Maps pixels from image (t) to image (t+1) coordinates if used directly,
+    or accumulates motion if chained.
+    """
+    c = np.cos(theta)
+    s = np.sin(theta)
+
+    # Rigid Body Transformation Matrix
+    # [[cos, -sin, u],
+    #  [sin,  cos, v],
+    #  [0,    0,   1]]
+    M = np.array([
+        [c, -s, u],
+        [s, c, v],
+        [0, 0, 1]
+    ])
+    return M
+
+
+def find_canvas_limits(frames, step_size, border_cut):
+    """
+    Calculates the cumulative motion to find the size of the panorama canvas.
+    Args:
+        frames: List or Array of grayscale images (N, H, W).
+        step_size: Parameter for optical_flow pyramids.
+        border_cut: Parameter for optical_flow window.
+    Returns:
+        absolute_transforms: List of 3x3 matrices mapping each frame to the first frame.
+        canvas_size: (height, width) of the required canvas.
+        offset: (y_offset, x_offset) to shift all original_frames into positive coordinates.
+    """
+    # Identify is initialized to Identity (No motion for first frame)
+    current_T = np.eye(3)
+
+    # List to store the absolute transform of EACH frame relative to the first frame
+    absolute_transforms = [current_T]
+
+    for i in range(len(frames) - 1):
+        im1 = frames[i]
+        im2 = frames[i + 1]
+
+        # Get motion
+        u, v, theta = optical_flow(im1, im2, step_size, border_cut)
+
+        # Create matrix for this step (im_i -> im_{i+1})
+        # Note: We need the inverse mapping logic usually for warping,
+        # but for coordinate accumulation, we stick to the forward chain.
+        M = build_matrix(u, v, theta)
+
+        # Accumulate: T_global_next = T_global_curr @ M
+        # (Assuming M maps from i to i+1)
+        current_T = current_T @ M
+        absolute_transforms.append(current_T)
+
+    # Find min/max coordinates
+    # We need to project the corners of every frame into the global coordinate system
+    # to see how far they reach.
+    h, w = frames[0].shape
+    corners = np.array([
+        [0, 0, 1],
+        [w, 0, 1],
+        [w, h, 1],
+        [0, h, 1]
+    ]).T  # Shape (3, 4)
+
+    min_x, max_x = 0, w
+    min_y, max_y = 0, h
+
+    for T in absolute_transforms:
+        # Transform corners: new_corners = T @ corners
+        warped_corners = T @ corners
+
+        # Normalize (though for Rigid it's always 1, good practice)
+        warped_corners = warped_corners / warped_corners[2, :]
+
+        xs = warped_corners[0, :]
+        ys = warped_corners[1, :]
+
+        min_x = min(min_x, xs.min())
+        max_x = max(max_x, xs.max())
+        min_y = min(min_y, ys.min())
+        max_y = max(max_y, ys.max())
+
+    canvas_w = int(np.ceil(max_x - min_x))
+    canvas_h = int(np.ceil(max_y - min_y))
+
+    # The offset needed to shift everything to positive coordinates
+    offset_x = -min_x
+    offset_y = -min_y
+
+    return absolute_transforms, (canvas_h, canvas_w), (offset_y, offset_x)
