@@ -291,9 +291,6 @@ def build_matrix(u, v, theta):
     s = np.sin(theta)
 
     # Rigid Body Transformation Matrix
-    # [[cos, -sin, u],
-    #  [sin,  cos, v],
-    #  [0,    0,   1]]
     M = np.array([
         [c, -s, u],
         [s, c, v],
@@ -374,3 +371,102 @@ def find_canvas_limits(frames, step_size, border_cut):
     offset_y = -min_y
 
     return absolute_transforms, (canvas_h, canvas_w), (offset_y, offset_x)
+
+
+def warp_global(image, T_inv, canvas_shape):
+    """
+    Warps an image into the global canvas coordinates.
+    Used for creating the panorama.
+
+    Args:
+        image: The source image (H, W).
+        T_inv: The inverse transformation matrix (3x3) that maps:
+               Canvas Pixel -> Source Image Pixel.
+        canvas_shape: Target shape (H_canvas, W_canvas).
+    """
+    H_canvas, W_canvas = canvas_shape
+
+    # 1. Create a grid of ALL pixels in the canvas
+    # We create a meshgrid of (x, y) coordinates covering the whole canvas
+    x = np.arange(W_canvas)
+    y = np.arange(H_canvas)
+    xv, yv = np.meshgrid(x, y)
+
+    # 2. Stack to shape (3, N) for matrix multiplication
+    # Vectors are [x, y, 1]
+    ones = np.ones_like(xv)
+    coords = np.stack([xv, yv, ones]).reshape(3, -1)
+
+    # 3. Apply Inverse Transformation to find source coordinates
+    # source_coords = T_inv @ canvas_coords
+    src_coords_flat = T_inv @ coords
+
+    # 4. Normalize (divide by z to get 2D coords)
+    # In rigid motion z is usually 1, but good practice for homography
+    z_vec = src_coords_flat[2, :]
+    # Avoid division by zero
+    z_vec[z_vec == 0] = 1e-10
+
+    src_x = src_coords_flat[0, :] / z_vec
+    src_y = src_coords_flat[1, :] / z_vec
+
+    # 5. Reshape back to canvas grid shape
+    src_x = src_x.reshape(H_canvas, W_canvas)
+    src_y = src_y.reshape(H_canvas, W_canvas)
+
+    # 6. Sample from the source image
+    # map_coordinates expects (row_coords, col_coords) -> (y, x)
+    # We use order=1 (linear interpolation) and cval=0 (black background)
+    warped_image = map_coordinates(image, [src_y, src_x], order=1, cval=0,
+                                   prefilter=False)
+
+    return warped_image
+
+
+def create_panorama(frames, step_size, border_cut):
+    """
+    Creates a panoramic mosaic by stitching all frames together (Step 3b).
+    Naive implementation: Pastes frames on top of each other.
+    """
+    print("Calculating canvas limits...")
+    # 1. Calculate limits and all global transforms
+    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
+        frames, step_size, border_cut)
+
+    H_canvas, W_canvas = canvas_shape
+    print(f"Canvas Size: {W_canvas}x{H_canvas}")
+
+    # 2. Initialize Panorama (Black canvas)
+    panorama = np.zeros((H_canvas, W_canvas))
+
+    # 3. Create Offset Matrix
+    # This shifts (0,0) to (offset_x, offset_y) so everything fits
+    T_offset = np.eye(3)
+    T_offset[0, 2] = offset_x  # x translation
+    T_offset[1, 2] = offset_y  # y translation
+
+    print("Stitching frames...")
+
+    for i, frame in enumerate(frames):
+        # A. Calculate the Total Transform (Frame -> Canvas)
+        # T_rel maps Frame -> Global(0,0)
+        # T_offset maps Global(0,0) -> Canvas(positive coords)
+        T_rel = abs_transforms[i]
+        T_total = T_offset @ T_rel
+
+        # B. We need the Inverse for warping (Canvas -> Frame)
+        T_inv = np.linalg.inv(T_total)
+
+        # C. Warp the current frame onto the canvas
+        warped_frame = warp_global(frame, T_inv, (H_canvas, W_canvas))
+
+        # D. Paste onto panorama
+        # np.maximum allows us to overlay the image w/o overwriting pixels with black borders.
+        panorama = np.maximum(panorama, warped_frame)
+        # panorama += warped_frame  # Alternative: simple addition (may cause brightness issues)
+
+        # Progress log
+        if i % 5 == 0 or i == len(frames) - 1:
+            print(f"Pasted frame {i + 1}/{len(frames)}")
+
+    return panorama
