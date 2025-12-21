@@ -423,14 +423,15 @@ def warp_global(image, T_inv, canvas_shape):
     return warped_image
 
 
-#todo: delete later
+# todo: delete later
 def create_panorama(frames, step_size, border_cut):
     """
     Creates a panoramic mosaic (Step 3b) by pasting frames.
     Fixes the 'black border overwrite' issue by treating black pixels as transparent.
     """
     print("Calculating canvas limits...")
-    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(frames, step_size, border_cut)
+    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
+        frames, step_size, border_cut)
 
     H_canvas, W_canvas = canvas_shape
     print(f"Canvas Size: {W_canvas}x{H_canvas}")
@@ -444,7 +445,8 @@ def create_panorama(frames, step_size, border_cut):
     h_img, w_img = frames[0].shape
 
     # Pre-define corners for ROI calculation
-    corners = np.array([[0, 0, 1], [w_img, 0, 1], [w_img, h_img, 1], [0, h_img, 1]]).T
+    corners = np.array(
+        [[0, 0, 1], [w_img, 0, 1], [w_img, h_img, 1], [0, h_img, 1]]).T
 
     print("Stitching frames...")
 
@@ -497,7 +499,8 @@ def create_panorama(frames, step_size, border_cut):
         mask_grid = geo_mask.reshape(roi_h, roi_w)
 
         # Use simple interpolation
-        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1, prefilter=False)
+        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1,
+                                   prefilter=False)
 
         # 7. Mask 2: Content Validity (Ignore black pixels from generator padding)
         # We only paste if the NEW pixel is not black.
@@ -512,19 +515,20 @@ def create_panorama(frames, step_size, border_cut):
         pan_slice[final_mask] = new_vals[final_mask]
         panorama[min_y:max_y, min_x:max_x] = pan_slice
 
-        if i % 5 == 0 or i == len(frames)-1:
-            print(f"Pasted frame {i+1}/{len(frames)}")
+        if i % 5 == 0 or i == len(frames) - 1:
+            print(f"Pasted frame {i + 1}/{len(frames)}")
 
     return panorama
+
 
 def create_mosaic(frames, step_size, border_cut):
     """
     Creates a panorama using the Strips method (Section 4).
-    Instead of pasting the whole frame, we paste a vertical strip
-    from the center of each frame.
+    IMPROVED: Uses DYNAMIC strip width based on actual motion between frames.
     """
     print("Calculating canvas limits...")
-    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(frames, step_size, border_cut)
+    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
+        frames, step_size, border_cut)
 
     H_canvas, W_canvas = canvas_shape
     print(f"Canvas Size: {W_canvas}x{H_canvas}")
@@ -537,60 +541,63 @@ def create_mosaic(frames, step_size, border_cut):
 
     h_img, w_img = frames[0].shape
 
-    # --- STRIP CALCULATION ---
-    # We need to decide the width of the strip.
-    # In a perfect uniform motion (like the synthetic video), strip width = dx.
-    # We can estimate the average motion from the last frame's position.
-
-    # Total x-movement / number of steps
-    last_T = abs_transforms[-1]
-    total_dx = last_T[0, 2] # The x-translation component
-    avg_dx = total_dx / (len(frames) - 1)
-    buffer = 4  # Extra pixels to avoid gaps
-    strip_width = int(np.round(avg_dx)) + buffer
-    strip_width = max(1, strip_width) # Safety
-
-    print(f"Detected average motion: {avg_dx:.2f} px. Using strip width: {strip_width}")
-
-    # Define the strip boundaries in the SOURCE image coordinates.
-    # We take the strip from the center of the image.
-    strip_start_x = (w_img // 2) - (strip_width // 2)
-    strip_end_x = strip_start_x + strip_width
-
-    # Define corners of the STRIP (not the whole image)
-    # This is the "cookie cutter" we will map to the canvas.
-    strip_corners = np.array([
-        [strip_start_x, 0, 1],
-        [strip_end_x,   0, 1],
-        [strip_end_x,   h_img, 1],
-        [strip_start_x, h_img, 1]
-    ]).T
-
-    print("Stitching strips...")
+    print("Stitching strips with dynamic width...")
 
     for i, frame in enumerate(frames):
         # 1. Transform setup
         T_total = T_offset @ abs_transforms[i]
         T_inv = np.linalg.inv(T_total)
 
-        # 2. Where does the STRIP land on the canvas?
+        # --- DYNAMIC STRIP WIDTH CALCULATION ---
+        # Logic: The strip should cover the distance to the NEXT frame.
+        if i < len(frames) - 1:
+            # Get global X position of current and next frame
+            curr_x = abs_transforms[i][0, 2]
+            next_x = abs_transforms[i + 1][0, 2]
+            # The distance is the motion magnitude
+            dist = abs(next_x - curr_x)
+            # Add small padding for overlap (prevents rounding gaps)
+            strip_width = int(np.ceil(dist)) + 2
+        else:
+            # Last frame: No "next" frame.
+            # We can use the same width as the previous one, or just a fixed width.
+            # Let's assume continuity from the previous step.
+            prev_x = abs_transforms[i - 1][0, 2]
+            curr_x = abs_transforms[i][0, 2]
+            dist = abs(curr_x - prev_x)
+            strip_width = int(np.ceil(dist)) + 2
+
+        strip_width = max(1, strip_width) # safety
+
+        # Center the strip in the source image
+        strip_start_x = (w_img // 2) - (strip_width // 2)
+        strip_end_x = strip_start_x + strip_width
+
+        # Define corners of the STRIP
+        strip_corners = np.array([
+            [strip_start_x, 0, 1],
+            [strip_end_x, 0, 1],
+            [strip_end_x, h_img, 1],
+            [strip_start_x, h_img, 1]
+        ]).T
+
+        # 2. Project Strip to Canvas
         warped_corners = T_total @ strip_corners
         warped_corners = warped_corners / warped_corners[2, :]
 
-        # Bounding box of the STRIP on the canvas
         min_x = int(np.floor(warped_corners[0, :].min()))
         max_x = int(np.ceil(warped_corners[0, :].max()))
         min_y = int(np.floor(warped_corners[1, :].min()))
         max_y = int(np.ceil(warped_corners[1, :].max()))
 
-        # Clip to canvas
+        # Clip
         min_x, max_x = max(0, min_x), min(W_canvas, max_x)
         min_y, max_y = max(0, min_y), min(H_canvas, max_y)
 
         if max_x <= min_x or max_y <= min_y:
             continue
 
-        # 3. Create Grid for ROI
+        # 3. Create Grid
         x_range = np.arange(min_x, max_x)
         y_range = np.arange(min_y, max_y)
         xv, yv = np.meshgrid(x_range, y_range)
@@ -602,8 +609,7 @@ def create_mosaic(frames, step_size, border_cut):
         src_x = src_coords[0, :]
         src_y = src_coords[1, :]
 
-        # 5. Mask: Only geometric validity!
-        # NO NEED for content check (black pixels) because we are in the center of the frame!
+        # 5. Mask (Geometric only)
         is_valid_x = (src_x >= 0) & (src_x <= w_img - 1)
         is_valid_y = (src_y >= 0) & (src_y <= h_img - 1)
         valid_mask = is_valid_x & is_valid_y
@@ -617,13 +623,14 @@ def create_mosaic(frames, step_size, border_cut):
         src_y_grid = src_y.reshape(roi_h, roi_w)
         mask_grid = valid_mask.reshape(roi_h, roi_w)
 
-        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1, prefilter=False)
+        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1,
+                                   prefilter=False)
 
         pan_slice = panorama[min_y:max_y, min_x:max_x]
         pan_slice[mask_grid] = new_vals[mask_grid]
         panorama[min_y:max_y, min_x:max_x] = pan_slice
 
-        if i % 5 == 0:
-            print(f"Pasted strip {i}/{len(frames)}")
+        if i % 10 == 0 or i == len(frames) - 1:
+            print(f"Stitched {i}/{len(frames)}")
 
     return panorama
