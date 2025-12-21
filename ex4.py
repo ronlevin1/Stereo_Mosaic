@@ -327,6 +327,10 @@ def find_canvas_limits(frames, step_size, border_cut):
         # Create matrix for this step (im_i -> im_{i+1})
         # Note: We need the inverse mapping logic usually for warping,
         # but for coordinate accumulation, we stick to the forward chain.
+        # TODO: modify direction by some condition if needed
+        u *= -1
+        v *= -1
+        theta *= -1
         M = build_matrix(u, v, theta)
 
         # Accumulate: T_global_next = T_global_curr @ M
@@ -423,110 +427,13 @@ def warp_global(image, T_inv, canvas_shape):
     return warped_image
 
 
-# todo: delete later
-def create_panorama(frames, step_size, border_cut):
-    """
-    Creates a panoramic mosaic (Step 3b) by pasting frames.
-    Fixes the 'black border overwrite' issue by treating black pixels as transparent.
-    """
-    print("Calculating canvas limits...")
-    abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
-        frames, step_size, border_cut)
-
-    H_canvas, W_canvas = canvas_shape
-    print(f"Canvas Size: {W_canvas}x{H_canvas}")
-
-    panorama = np.zeros((H_canvas, W_canvas))
-
-    T_offset = np.eye(3)
-    T_offset[0, 2] = offset_x
-    T_offset[1, 2] = offset_y
-
-    h_img, w_img = frames[0].shape
-
-    # Pre-define corners for ROI calculation
-    corners = np.array(
-        [[0, 0, 1], [w_img, 0, 1], [w_img, h_img, 1], [0, h_img, 1]]).T
-
-    print("Stitching frames...")
-
-    for i, frame in enumerate(frames):
-        # 1. Transform setup
-        T_total = T_offset @ abs_transforms[i]
-        T_inv = np.linalg.inv(T_total)
-
-        # 2. Calculate ROI (Bounding Box on Canvas)
-        warped_corners = T_total @ corners
-        warped_corners = warped_corners / warped_corners[2, :]
-
-        min_x = int(np.floor(warped_corners[0, :].min()))
-        max_x = int(np.ceil(warped_corners[0, :].max()))
-        min_y = int(np.floor(warped_corners[1, :].min()))
-        max_y = int(np.ceil(warped_corners[1, :].max()))
-
-        # Clip to canvas
-        min_x, max_x = max(0, min_x), min(W_canvas, max_x)
-        min_y, max_y = max(0, min_y), min(H_canvas, max_y)
-
-        if max_x <= min_x or max_y <= min_y:
-            continue
-
-        # 3. Create Grid for ROI
-        x_range = np.arange(min_x, max_x)
-        y_range = np.arange(min_y, max_y)
-        xv, yv = np.meshgrid(x_range, y_range)
-        coords_roi = np.stack([xv, yv, np.ones_like(xv)]).reshape(3, -1)
-
-        # 4. Back-Warp
-        src_coords = T_inv @ coords_roi
-        src_coords = src_coords / src_coords[2, :]
-
-        src_x = src_coords[0, :]
-        src_y = src_coords[1, :]
-
-        # 5. Mask 1: Geometric Validity (Inside original frame boundaries)
-        is_valid_x = (src_x >= 0) & (src_x <= w_img - 1)
-        is_valid_y = (src_y >= 0) & (src_y <= h_img - 1)
-        geo_mask = is_valid_x & is_valid_y
-
-        if not np.any(geo_mask):
-            continue
-
-        # 6. Sample Colors
-        roi_h, roi_w = max_y - min_y, max_x - min_x
-        src_x_grid = src_x.reshape(roi_h, roi_w)
-        src_y_grid = src_y.reshape(roi_h, roi_w)
-        mask_grid = geo_mask.reshape(roi_h, roi_w)
-
-        # Use simple interpolation
-        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1,
-                                   prefilter=False)
-
-        # 7. Mask 2: Content Validity (Ignore black pixels from generator padding)
-        # We only paste if the NEW pixel is not black.
-        # This treats the generator's black borders as transparent.
-        content_mask = new_vals > 1e-5  # Threshold for "not black"
-
-        # Combine masks: Must be inside frame AND not be a black border pixel
-        final_mask = mask_grid & content_mask
-
-        # 8. Paste
-        pan_slice = panorama[min_y:max_y, min_x:max_x]
-        pan_slice[final_mask] = new_vals[final_mask]
-        panorama[min_y:max_y, min_x:max_x] = pan_slice
-
-        if i % 5 == 0 or i == len(frames) - 1:
-            print(f"Pasted frame {i + 1}/{len(frames)}")
-
-    return panorama
-
-
 def create_mosaic(frames, step_size, border_cut):
     """
     Creates a panorama using the Strips method (Section 4).
-    IMPROVED: Uses DYNAMIC strip width based on actual motion between frames.
+    FINAL VERSION: Handles First and Last noisy_frames specially to fill the whole canvas.
     """
     print("Calculating canvas limits...")
+    frames = stabilize_video(frames, step_size, border_cut)
     abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
         frames, step_size, border_cut)
 
@@ -541,7 +448,7 @@ def create_mosaic(frames, step_size, border_cut):
 
     h_img, w_img = frames[0].shape
 
-    print("Stitching strips with dynamic width...")
+    print("Stitching strips (with edge filling)...")
 
     for i, frame in enumerate(frames):
         # 1. Transform setup
@@ -549,31 +456,46 @@ def create_mosaic(frames, step_size, border_cut):
         T_inv = np.linalg.inv(T_total)
 
         # --- DYNAMIC STRIP WIDTH CALCULATION ---
-        # Logic: The strip should cover the distance to the NEXT frame.
+        padding = 1  # Extra pixels to avoid seams or gaps
         if i < len(frames) - 1:
-            # Get global X position of current and next frame
             curr_x = abs_transforms[i][0, 2]
             next_x = abs_transforms[i + 1][0, 2]
-            # The distance is the motion magnitude
             dist = abs(next_x - curr_x)
-            # Add small padding for overlap (prevents rounding gaps)
-            strip_width = int(np.ceil(dist)) + 2
+            strip_width = int(np.ceil(dist)) + padding
         else:
-            # Last frame: No "next" frame.
-            # We can use the same width as the previous one, or just a fixed width.
-            # Let's assume continuity from the previous step.
+            # Last frame fallback
             prev_x = abs_transforms[i - 1][0, 2]
             curr_x = abs_transforms[i][0, 2]
             dist = abs(curr_x - prev_x)
-            strip_width = int(np.ceil(dist)) + 2
+            strip_width = int(np.ceil(dist)) + padding
 
-        strip_width = max(1, strip_width) # safety
+        strip_width = max(1, strip_width)
 
-        # Center the strip in the source image
-        strip_start_x = (w_img // 2) - (strip_width // 2)
-        strip_end_x = strip_start_x + strip_width
+        # --- SPECIAL HANDLING FOR EDGES ---
+        # Instead of always taking the center, we expand the selection for first/last noisy_frames.
+        center_x = w_img // 2
 
-        # Define corners of the STRIP
+        if i == 0:
+            # FIRST FRAME: Take everything from pixel 0 up to the end of the strip
+            # This fills the black void on the left
+            strip_start_x = 0
+            strip_end_x = center_x + (strip_width // 2)
+            # print(f">>> Frame 0 (Left Edge): Start={strip_start_x}, End={strip_end_x}")  # DEBUG PRINT
+
+        elif i == len(frames) - 1:
+            # LAST FRAME: Take everything from the start of the strip to the end of the image
+            # This fills the black void on the right
+            strip_start_x = center_x - (strip_width // 2)
+            strip_end_x = w_img
+            # print(f">>> Frame {i} (Right Edge): Start={strip_start_x}, End={strip_end_x}")  # DEBUG PRINT
+
+        else:
+            # MIDDLE FRAMES: Take the standard strip from the center
+            strip_start_x = center_x - (strip_width // 2)
+            strip_end_x = strip_start_x + strip_width
+            # print(f"Frame {i}: Start={strip_start_x}, End={strip_end_x}")
+
+        # Define corners based on the calculated range
         strip_corners = np.array([
             [strip_start_x, 0, 1],
             [strip_end_x, 0, 1],
@@ -590,9 +512,9 @@ def create_mosaic(frames, step_size, border_cut):
         min_y = int(np.floor(warped_corners[1, :].min()))
         max_y = int(np.ceil(warped_corners[1, :].max()))
 
-        # Clip
         min_x, max_x = max(0, min_x), min(W_canvas, max_x)
         min_y, max_y = max(0, min_y), min(H_canvas, max_y)
+        # print(f"Frame {i}: Pasting at Canvas X range: {min_x} to {max_x}")
 
         if max_x <= min_x or max_y <= min_y:
             continue
@@ -623,14 +545,14 @@ def create_mosaic(frames, step_size, border_cut):
         src_y_grid = src_y.reshape(roi_h, roi_w)
         mask_grid = valid_mask.reshape(roi_h, roi_w)
 
-        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=1,
+        new_vals = map_coordinates(frame, [src_y_grid, src_x_grid], order=3,
                                    prefilter=False)
 
         pan_slice = panorama[min_y:max_y, min_x:max_x]
         pan_slice[mask_grid] = new_vals[mask_grid]
         panorama[min_y:max_y, min_x:max_x] = pan_slice
 
-        if i % 10 == 0 or i == len(frames) - 1:
+        if i % 10 == 0:
             print(f"Stitched {i}/{len(frames)}")
 
     return panorama
