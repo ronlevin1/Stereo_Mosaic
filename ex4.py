@@ -228,25 +228,27 @@ def optical_flow(im1, im2, step_size, border_cut):
     return u, v, theta
 
 
-def stabilize_video(frames, step_size, border_cut):
+def stabilize_video(frames, step_size, border_cut, enable_rotation=False):
     """
-    Stabilizes a video sequence by keeping only horizontal motion.
-    Based on instruction 2b: "only horizontal motion".
+    Stabilizes a video sequence.
+    Allows disabling rotation correction to keep the horizon straight if rotation is negligible.
 
     Args:
         frames: List or Array of grayscale images (N, H, W).
         step_size: Parameter for optical_flow pyramids.
         border_cut: Parameter for optical_flow window.
+        enable_rotation: Bool. If False, forces theta correction to be 0.
 
     Returns:
         stabilized_frames: List of warped images (same length as input).
     """
+    print(f"Creating panorama with rotation_correction={enable_rotation}.")
     stabilized_frames = []
 
     # 1. Initialize Cumulative Path (Drift)
     # We assume the first frame is the anchor (0,0,0)
     current_y_drift = 0.0
-    current_theta_drift = 0.0  # todo: consider zeroing rotation
+    current_theta_drift = 0.0
 
     # The first frame is already "stable" relative to itself
     stabilized_frames.append(frames[0])
@@ -256,28 +258,35 @@ def stabilize_video(frames, step_size, border_cut):
         im1 = frames[i]
         im2 = frames[i + 1]
 
-        # A. Calculate motion between consecutive original_frames (Chain Step)
+        # A. Calculate motion between consecutive frames
         # u: dx, v: dy, theta: d_theta
         u, v, theta = optical_flow(im1, im2, step_size, border_cut)
 
-        # B. Accumulate the vertical and rotational drift (relative to first frame)
+        # B. Accumulate the vertical drift
         current_y_drift += v
-        current_theta_drift += theta
 
-        # C. Fix the current frame (im2)
+        # C. Accumulate rotational drift ONLY if enabled
+        if enable_rotation:
+            current_theta_drift += theta
+        else:
+            # If disabled, we ignore the calculated theta for stabilization purposes
+            # effectively assuming the camera remained parallel to the horizon.
+            pass
+
+            # D. Fix the current frame (im2)
         fix_u = 0.0  # Do not touch horizontal movement
         fix_v = current_y_drift  # Cancel total vertical drift
-        fix_theta = current_theta_drift  # Cancel total rotation
+        fix_theta = current_theta_drift  # Cancel total rotation (or 0 if disabled)
 
-        # D. Apply Warp
-        # warp_image expects (u, v, theta) as the "shift to apply".
+        # E. Apply Warp
         warped_frame = warp_image(im2, fix_u, fix_v, fix_theta)
 
         stabilized_frames.append(warped_frame)
 
-        # TODO - Optional: Print progress
+        # Progress print
+        deg_print = np.rad2deg(fix_theta)
         print(
-            f"Frame {i + 1}/{len(frames) - 1}: Correction applied (dy={fix_v:.2f}, dth={np.rad2deg(fix_theta):.2f}°)")
+            f"Frame {i + 1}: Correction (dy={fix_v:.2f}, dth={deg_print:.2f}°)")
 
     return stabilized_frames
 
@@ -469,7 +478,8 @@ def create_mosaic(frames, step_size, border_cut):
     FINAL VERSION: Handles First and Last noisy_frames specially to fill the whole canvas.
     """
     print("Calculating canvas limits...")
-    frames = stabilize_video(frames, step_size, border_cut)
+    frames = stabilize_video(frames, step_size, border_cut,
+                             enable_rotation=False)
     abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
         frames, step_size, border_cut)
 
