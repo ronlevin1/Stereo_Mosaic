@@ -53,7 +53,6 @@ Implement the following functions with these exact signatures and behaviors:
 * Output: Stabilized RGB frames.
 
 
-
 #### 4. Pipeline Step 3: Camera Path
 
 * **`compute_camera_path(frames_rgb, step_size, border_cut, convergence_point=None)`**:
