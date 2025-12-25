@@ -651,6 +651,35 @@ def load_video_frames(filename, inputs_folder='Exercise Inputs',
     return frames_np
 
 
+def save_panorama(panorama, output_path="outputs", filename="panorama.jpg"):
+    """
+    Saves the panorama to a specific folder and filename.
+    Creates the folder if it doesn't exist.
+    """
+    # 1. Ensure the directory exists
+    if not os.path.exists(output_path):
+        print(f"Creating directory: {output_path}")
+        os.makedirs(output_path, exist_ok=True)
+
+    # 2. Construct the full path (OS independent)
+    # This handles slashes correctly on Mac (/) vs Windows (\)
+    full_path = os.path.join(output_path, filename)
+
+    print(f"Saving panorama to: {full_path}...")
+
+    # 3. Process Image (Clip & Convert to uint8)
+    # Critical step: prevents black images or color artifacts
+    panorama_clipped = np.clip(panorama, 0, 1)
+    panorama_uint8 = (panorama_clipped * 255).astype(np.uint8)
+
+    # 4. Save
+    try:
+        imageio.imwrite(full_path, panorama_uint8)
+        print("Success! Image saved.")
+    except Exception as e:
+        print(f"Error saving image: {e}")
+
+
 # todo: main pipeline
 def main():
     pass
