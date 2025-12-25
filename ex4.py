@@ -1,7 +1,8 @@
+import os
+import imageio
 import numpy as np
 from scipy import signal
 from scipy.ndimage import map_coordinates, convolve1d
-import imageio
 from skimage.color import rgb2gray
 
 "------------------------------------------------------------------------------"
@@ -245,7 +246,7 @@ def stabilize_video(frames, step_size, border_cut):
     # 1. Initialize Cumulative Path (Drift)
     # We assume the first frame is the anchor (0,0,0)
     current_y_drift = 0.0
-    current_theta_drift = 0.0
+    current_theta_drift = 0.0  # todo: consider zeroing rotation
 
     # The first frame is already "stable" relative to itself
     stabilized_frames.append(frames[0])
@@ -375,6 +376,41 @@ def find_canvas_limits(frames, step_size, border_cut):
     offset_y = -min_y
 
     return absolute_transforms, (canvas_h, canvas_w), (offset_y, offset_x)
+
+
+# TODO: integrate into main pipeline where needed
+def apply_convergence_correction(absolute_transforms, focal_point=None):
+    """
+    Adjusts transforms so that 'focal_point' stays stationary.
+    focal_point: (x, y) tuple in Frame 0 coordinates.
+    """
+    if focal_point is None:
+        return absolute_transforms  # Default: Infinity alignment
+
+    fx, fy = focal_point
+    corrected_transforms = []
+
+    for T in absolute_transforms:
+        # 1. Where does the point land currently?
+        # Project (fx, fy, 1) using T
+        p_homog = T @ np.array([fx, fy, 1.0])
+        px, py = p_homog[0] / p_homog[2], p_homog[1] / p_homog[2]
+
+        # 2. Calculate shift needed to bring it back to (fx, fy)
+        shift_x = fx - px
+        shift_y = fy - py
+
+        # 3. Create shift matrix
+        T_shift = np.eye(3)
+        T_shift[0, 2] = shift_x
+        T_shift[1, 2] = shift_y
+
+        # 4. Update the transform
+        # We apply the shift AFTER the original transform
+        T_new = T_shift @ T
+        corrected_transforms.append(T_new)
+
+    return corrected_transforms
 
 
 def warp_global(image, T_inv, canvas_shape):
@@ -556,3 +592,65 @@ def create_mosaic(frames, step_size, border_cut):
             print(f"Stitched {i}/{len(frames)}")
 
     return panorama
+
+
+# todo: load video frames
+def load_video_frames(filename, inputs_folder='Exercise Inputs',
+                      max_frames=None, downscale_factor=1):
+    """
+    Loads a video file, converts to grayscale, and normalizes to [0, 1].
+
+    Args:
+        filename (str): Name of the video file (e.g., 'my_video.mp4').
+        inputs_folder (str): Relative folder path.
+        max_frames (int): Optional limit to load only the first N frames (for testing).
+        downscale_factor (int): Optional shrinking (e.g., 2 will reduce size by half).
+                                Highly recommended for large videos to save runtime!
+
+    Returns:
+        np.array: A 3D array of shape (N, H, W) containing grayscale float frames.
+    """
+    # 1. Construct full path
+    # Assuming the script runs from the root or src folder
+    video_path = os.path.join(inputs_folder, filename)
+
+    print(f"Loading video from: {video_path}")
+
+    if not os.path.exists(video_path):
+        raise FileNotFoundError(f"Could not find video at {video_path}")
+
+    # 2. Open Video Reader
+    reader = imageio.get_reader(video_path)
+    frames = []
+
+    for i, frame in enumerate(reader):
+        # Optional: Stop after N frames
+        if max_frames and i >= max_frames:
+            break
+
+        # 3. Downscale (Simple subsampling) if requested
+        if downscale_factor > 1:
+            frame = frame[::downscale_factor, ::downscale_factor, :]
+
+        # 4. Convert to Grayscale and Normalize
+        if frame.ndim == 3:
+            if frame.shape[2] == 4:  # Handle RGBA
+                frame = frame[:, :, :3]
+            gray_frame = rgb2gray(frame)
+        else:
+            gray_frame = frame.astype(np.float64) / 255.0
+
+        frames.append(gray_frame)
+
+    reader.close()
+
+    frames_np = np.array(frames)
+    print(
+        f"Successfully loaded {len(frames_np)} frames. Shape: {frames_np.shape}")
+
+    return frames_np
+
+
+# todo: main pipeline
+def main():
+    pass
