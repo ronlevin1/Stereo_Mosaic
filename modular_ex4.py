@@ -450,7 +450,7 @@ def optical_flow(
 
 def dynamic_mosaic(frames, transforms, canvas,
                    padding=2, grayscale=False,
-                   start=0.2, stop=0.8, num=10):
+                   start=0.2, stop=0.8, num_views=10):
     """
     Create a dynamic mosaic video by rendering strip panoramas with varying strip anchors.
     Args:
@@ -461,13 +461,13 @@ def dynamic_mosaic(frames, transforms, canvas,
         grayscale (bool): Whether to output grayscale panoramas.
         start (float): Starting anchor position (0.0 to 1.0).
         stop (float): Ending anchor position (0.0 to 1.0).
-        num (int): Number of frames to generate between start and stop.
+        num_views (int): Number of frames to generate between start and stop.
     Returns:
         List[np.ndarray]: List of panorama frames as uint8 arrays.
     """
     movie_frames = []
 
-    for anchor in np.linspace(start, stop, num):
+    for anchor in np.linspace(start, stop, num_views):
         print(f"Creating panorama for anchor {anchor:.2f}...")
 
         pan = render_strip_panorama(frames, transforms, canvas,
@@ -481,3 +481,15 @@ def dynamic_mosaic(frames, transforms, canvas,
     # append all frames in reverse order to create a back-and-forth effect
     movie_frames += movie_frames[::-1]
     return movie_frames
+
+#TODO:
+# - blur video as first step (especially Kessaria)
+# - split LK to rotation and translation components
+#       a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
+#           are in same distance from camera
+#       b. translation: with LK on the ROTATED frames
+# - NOTE: banana in result is OK. the right form is 'smiling' banana :)
+# - make these ^ functions return te transforms mtx for future reusal.
+# - set middle frame as the reference for stabilization
+# - OPTIMIZE RUNTIME to ~100sec: remove loops, use numpy vector operations,
+#          reduce write/any access to disk
