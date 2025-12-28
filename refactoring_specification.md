@@ -1,7 +1,7 @@
 ### Prompt for AI / Copilot
 
 **Project Objective:**
-Create a Python module (`ex4.py`) for Video Panorama Stitching (Pushbroom Stereo) using Optical Flow.
+Create a Python module (`modular_ex4.py`) for Video Panorama Stitching (Pushbroom Stereo) using Optical Flow.
 The code must be modular, separating the logic into a strict pipeline of 5 steps.
 
 **General Constraints:**
