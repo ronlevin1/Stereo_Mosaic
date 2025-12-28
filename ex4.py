@@ -479,7 +479,7 @@ def create_mosaic(frames, step_size, border_cut):
     """
     print("Calculating canvas limits...")
     frames = stabilize_video(frames, step_size, border_cut,
-                             enable_rotation=False)
+                             enable_rotation=True)
     abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
         frames, step_size, border_cut)
 
@@ -604,7 +604,6 @@ def create_mosaic(frames, step_size, border_cut):
     return panorama
 
 
-# todo: load video frames
 def load_video_frames(filename, inputs_folder='Exercise Inputs',
                       max_frames=None, downscale_factor=1):
     """
