@@ -357,12 +357,10 @@ def find_canvas_limits(frames, step_size, border_cut):
 def create_mosaic(frames, step_size, border_cut, strip_anchor=0.5):
     """
     Creates a COLOR panorama.
-    UPDATED: Calculates strip width based on the motion of the specific ANCHOR point,
-    solving gaps when rotation causes edges to move faster than the center.
+    UPDATED: Uses Safety Factor and Multi-point tracking to ensure no black gaps.
     """
     print(f"Step 1: Stabilizing Video (Anchor={strip_anchor})...")
-    frames = stabilize_video(frames, step_size, border_cut,
-                             enable_rotation=True)
+    frames = stabilize_video(frames, step_size, border_cut, enable_rotation=False)
 
     print("Step 2: Calculating Canvas Limits...")
     abs_transforms, canvas_shape, (offset_y, offset_x) = find_canvas_limits(
@@ -389,48 +387,62 @@ def create_mosaic(frames, step_size, border_cut, strip_anchor=0.5):
         T_total = T_offset @ abs_transforms[i]
         T_inv = np.linalg.inv(T_total)
 
-        # --- תיקון: חישוב רוחב פס חכם (Smart Strip Width) ---
-        padding = 3  # הגדלתי קצת לביטחון
+        # --- תיקון: חישוב רוחב פס רובסטי (Robust Strip Width) ---
+        padding = 2
 
         if i < len(frames) - 1:
-            # 1. ניקח את הנקודה שאנחנו רוצים לגזור (ה-Anchor)
-            # נשתמש בגובה האמצעי (h/2) כדי לייצג את העמודה
-            p_anchor = np.array([target_center, h_img / 2, 1])
+            # נבדוק תזוזה ב-3 גבהים שונים כדי לתפוס רוטציות קיצוניות
+            # Top, Center, Bottom
+            ys_to_check = [0, h_img / 2, h_img]
+            dists = []
 
-            # 2. נטיל את הנקודה הזו לקנבס דרך הטרנספורמציה של הפריים הנוכחי
-            # (איפה ה-Anchor הזה יושב על הפנורמה?)
-            p_curr_global = T_total @ p_anchor
-            x_curr_global = p_curr_global[0] / p_curr_global[2]
+            T_next_total = T_offset @ abs_transforms[i+1]
 
-            # 3. נטיל את אותה נקודה (Anchor) דרך הטרנספורמציה של הפריים *הבא*
-            # (איפה ה-Anchor של הפריים הבא יושב על הפנורמה?)
-            T_next_total = T_offset @ abs_transforms[i + 1]
-            p_next_global = T_next_total @ p_anchor
-            x_next_global = p_next_global[0] / p_next_global[2]
+            for y_check in ys_to_check:
+                p_anchor = np.array([target_center, y_check, 1])
 
-            # 4. המרחק ביניהם הוא בדיוק הרוחב שאנחנו צריכים לכסות!
-            dist = abs(x_next_global - x_curr_global)
-            strip_width = int(np.ceil(dist)) + padding
+                # הטלה לקנבס פריים נוכחי
+                p_curr = T_total @ p_anchor
+                x_curr = p_curr[0] / p_curr[2]
+
+                # הטלה לקנבס פריים הבא
+                p_next = T_next_total @ p_anchor
+                x_next = p_next[0] / p_next[2]
+
+                dists.append(abs(x_next - x_curr))
+
+            # לוקחים את התזוזה המקסימלית שמצאנו
+            max_dist = max(dists)
+
+            # --- התיקון הקריטי: מקדם ביטחון ---
+            # מכפילים ב-1.3 כדי להבטיח חפיפה.
+            # בפנורמה, Overlap זה בסדר גמור (זה נדרס), Gap זה אסון.
+            strip_width = int(np.ceil(max_dist * 1.3)) + padding
 
         else:
-            # בפריים האחרון אין "פריים הבא", נשתמש ברוחב של הקודם
-            # (זה פחות קריטי כי בפריים האחרון אנחנו לוקחים עד קצה התמונה ממילא)
-            # אבל ליתר ביטחון נחשב לפי הפריים הקודם
-            p_anchor = np.array([target_center, h_img / 2, 1])
+            # פריים אחרון - שימוש ברוחב של הפריים הקודם
+            # (לוגיקה זהה לפריים רגיל, רק אחורה)
+            ys_to_check = [0, h_img / 2, h_img]
+            dists = []
+            T_prev_total = T_offset @ abs_transforms[i-1]
 
-            p_curr_global = T_total @ p_anchor
-            x_curr_global = p_curr_global[0] / p_curr_global[2]
+            for y_check in ys_to_check:
+                p_anchor = np.array([target_center, y_check, 1])
 
-            T_prev_total = T_offset @ abs_transforms[i - 1]
-            p_prev_global = T_prev_total @ p_anchor
-            x_prev_global = p_prev_global[0] / p_prev_global[2]
+                p_curr = T_total @ p_anchor
+                x_curr = p_curr[0] / p_curr[2]
 
-            dist = abs(x_curr_global - x_prev_global)
-            strip_width = int(np.ceil(dist)) + padding
+                p_prev = T_prev_total @ p_anchor
+                x_prev = p_prev[0] / p_prev[2]
 
-        strip_width = max(1, strip_width)  # למנוע קריסה אם אין תזוזה
+                dists.append(abs(x_curr - x_prev))
 
-        # --- מכאן הכל נשאר זהה ללוגיקה הקודמת ---
+            max_dist = max(dists)
+            strip_width = int(np.ceil(max_dist * 1.3)) + padding
+
+        strip_width = max(1, strip_width)
+
+        # --- מכאן הכל נשאר זהה ---
 
         if i == 0:
             strip_start_x = 0
@@ -461,19 +473,16 @@ def create_mosaic(frames, step_size, border_cut, strip_anchor=0.5):
         if max_x <= min_x or max_y <= min_y:
             continue
 
-        # Grid
         x_range = np.arange(min_x, max_x)
         y_range = np.arange(min_y, max_y)
         xv, yv = np.meshgrid(x_range, y_range)
         coords_roi = np.stack([xv, yv, np.ones_like(xv)]).reshape(3, -1)
 
-        # Back-Warp
         src_coords = T_inv @ coords_roi
         src_coords /= src_coords[2, :]
         src_x = src_coords[0, :]
         src_y = src_coords[1, :]
 
-        # Mask
         is_valid_x = (src_x >= 0) & (src_x <= w_img - 1)
         is_valid_y = (src_y >= 0) & (src_y <= h_img - 1)
         valid_mask = is_valid_x & is_valid_y
@@ -486,10 +495,8 @@ def create_mosaic(frames, step_size, border_cut, strip_anchor=0.5):
         src_y_grid = src_y.reshape(roi_h, roi_w)
         mask_grid = valid_mask.reshape(roi_h, roi_w)
 
-        # --- SAMPLE COLORS ---
         for c in range(3):
-            new_vals = map_coordinates(frame[:, :, c],
-                                       [src_y_grid, src_x_grid],
+            new_vals = map_coordinates(frame[:, :, c], [src_y_grid, src_x_grid],
                                        order=1, prefilter=False)
 
             pan_slice = panorama[min_y:max_y, min_x:max_x, c]
@@ -500,7 +507,6 @@ def create_mosaic(frames, step_size, border_cut, strip_anchor=0.5):
             print(f"Stitched {i}/{len(frames)}")
 
     return panorama
-
 
 def dynamic_mosaic(frames, step_size=16, border_cut=15):
     """
