@@ -215,86 +215,66 @@ def _estimate_strip_width(
 "------------------------------------------------------------------------------"
 "------------------------------------------------------------------------------"
 
-
-def stabilize_video(
-        frames_rgb: np.ndarray,
-        step_size: int,
-        border_cut: int,
-        enable_rotation: bool = True,
-) -> np.ndarray:
+def compute_motion(frames_rgb, step_size, border_cut):
     """
-    Stabilize video frames using optical flow.
-    :param frames_rgb:
-    :param step_size:
-    :param border_cut:
-    :param enable_rotation:
-    :return:
+    Calculates raw_frames motion between consecutive frames.
+    Returns a list of (u, v, theta) tuples.
     """
-    if frames_rgb.ndim != 4 or frames_rgb.shape[-1] != 3:
-        raise ValueError(
-            "stabilize_video expects RGB frames with shape (N,H,W,3)")
-
-    stabilized_frames = [frames_rgb[0]]
-    drift_v = 0.0
-    drift_theta = 0.0
+    motion_data = []
 
     im1_gray = rgb2gray(frames_rgb[0])
-    for idx in range(frames_rgb.shape[0] - 1):
-        im2_gray = rgb2gray(frames_rgb[idx + 1])
+    for i in range(len(frames_rgb) - 1):
+        im2_gray = rgb2gray(frames_rgb[i+1])
         u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
-        drift_v += v
-        if enable_rotation:
-            drift_theta += theta
-        warped = warp_image(frames_rgb[idx + 1], 0.0, drift_v, drift_theta)
-        stabilized_frames.append(warped)
+        motion_data.append((u, v, theta))
         im1_gray = im2_gray
 
-    return np.stack(stabilized_frames, axis=0)
+    return motion_data
 
 
-def compute_camera_path(
-        frames_rgb: np.ndarray,
-        step_size: int,
-        border_cut: int,
-        convergence_point: Optional[Tuple[float, float]] = None,
-) -> List[np.ndarray]:
+def stabilize_video(frames_rgb, motion_data, enable_rotation=True):
     """
-    Compute camera path transforms from video frames.
-    Each transform is a 3x3 matrix representing the cumulative motion
-    from the first frame to the current frame.
-    :param frames_rgb:
-    :param step_size:
-    :param border_cut:
-    :param convergence_point:
-    :return:
+    Stabilize rotations and Y-axis translations
     """
-    if frames_rgb.ndim != 4:
-        raise ValueError("frames_rgb must be (N,H,W,3)")
+    stabilized_frames = [frames_rgb[0]]
+    current_v = 0.0
+    current_theta = 0.0
 
-    transforms: List[np.ndarray] = [np.eye(3, dtype=np.float64)]
-    current_T = np.eye(3, dtype=np.float64)
+    for i, (u, v, theta) in enumerate(motion_data):
+        current_v += v
+        if enable_rotation:
+            current_theta += theta
 
-    im1_gray = rgb2gray(frames_rgb[0])
-    for idx in range(frames_rgb.shape[0] - 1):
-        im2_gray = rgb2gray(frames_rgb[idx + 1])
-        u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
+        fix_u = 0
+        fix_v = current_v
+        fix_theta = current_theta
+
+        warped = warp_image(frames_rgb[i+1], fix_u, fix_v, fix_theta)
+        stabilized_frames.append(warped)
+
+    return np.array(stabilized_frames)
+
+def compute_camera_path(motion_data, convergence_point=None):
+    """
+    Compute the camera path as a list of transformation matrices.
+    """
+    transforms = [np.eye(3)]
+    current_T = np.eye(3)
+
+    for (u, v, theta) in motion_data:
         M = build_matrix(-u, -v, -theta)
         current_T = current_T @ M
-        transforms.append(current_T.copy())
-        im1_gray = im2_gray
+        transforms.append(current_T)
 
-    # todo: fix this
-    # # center the path around the middle frame
+    # todo: fix this !
     # mid_idx = len(transforms) // 2
-    # T_mid = transforms[mid_idx]
-    # T_mid_inv = np.linalg.inv(T_mid)
+    # mid_inv = np.linalg.inv(transforms[mid_idx])
     #
-    # # multiply each transform by T_mid_inv to center the path
-    # new_transforms = [T_mid_inv @ T for T in transforms]
+    # transforms = [mid_inv @ T for T in transforms]
 
-    # # anchor convergence after centering
-    # if convergence_point is not None:
-    #     new_transforms = _anchor_convergence(new_transforms, convergence_point)
+    # Convergence Point Logic (אם קיים)
+    if convergence_point is not None:
+        transforms = _anchor_convergence(transforms, convergence_point)
 
     return transforms
 
@@ -654,7 +634,10 @@ def load_frames_for_test(input_frames_path):
         raise ValueError("No frames found in the specified directory.")
     return np.stack(frames, axis=0)
 
-# TODO:
+# TODO: remove redundancy of calling optical_flow.
+#       build a func compute_motion for the core math and call it from both
+#       stabilize_video and compute_camera_path.
+#       as is now:
 #     in my code, these lines appear in 2 places:
 #     im1_gray = rgb2gray(frames_rgb[0])
 #         for idx in range(frames_rgb.shape[0] - 1):
