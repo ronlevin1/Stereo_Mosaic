@@ -2,6 +2,7 @@ import os
 from typing import List, Optional, Sequence, Tuple
 
 import imageio
+import PIL.Image
 import numpy as np
 from scipy import signal
 from scipy.ndimage import convolve1d, map_coordinates
@@ -221,6 +222,14 @@ def stabilize_video(
         border_cut: int,
         enable_rotation: bool = True,
 ) -> np.ndarray:
+    """
+    Stabilize video frames using optical flow.
+    :param frames_rgb:
+    :param step_size:
+    :param border_cut:
+    :param enable_rotation:
+    :return:
+    """
     if frames_rgb.ndim != 4 or frames_rgb.shape[-1] != 3:
         raise ValueError(
             "stabilize_video expects RGB frames with shape (N,H,W,3)")
@@ -229,8 +238,8 @@ def stabilize_video(
     drift_v = 0.0
     drift_theta = 0.0
 
+    im1_gray = rgb2gray(frames_rgb[0])
     for idx in range(frames_rgb.shape[0] - 1):
-        im1_gray = rgb2gray(frames_rgb[idx])
         im2_gray = rgb2gray(frames_rgb[idx + 1])
         u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
         drift_v += v
@@ -238,6 +247,7 @@ def stabilize_video(
             drift_theta += theta
         warped = warp_image(frames_rgb[idx + 1], 0.0, drift_v, drift_theta)
         stabilized_frames.append(warped)
+        im1_gray = im2_gray
 
     return np.stack(stabilized_frames, axis=0)
 
@@ -248,22 +258,43 @@ def compute_camera_path(
         border_cut: int,
         convergence_point: Optional[Tuple[float, float]] = None,
 ) -> List[np.ndarray]:
+    """
+    Compute camera path transforms from video frames.
+    Each transform is a 3x3 matrix representing the cumulative motion
+    from the first frame to the current frame.
+    :param frames_rgb:
+    :param step_size:
+    :param border_cut:
+    :param convergence_point:
+    :return:
+    """
     if frames_rgb.ndim != 4:
         raise ValueError("frames_rgb must be (N,H,W,3)")
 
     transforms: List[np.ndarray] = [np.eye(3, dtype=np.float64)]
     current_T = np.eye(3, dtype=np.float64)
 
+    im1_gray = rgb2gray(frames_rgb[0])
     for idx in range(frames_rgb.shape[0] - 1):
-        im1_gray = rgb2gray(frames_rgb[idx])
         im2_gray = rgb2gray(frames_rgb[idx + 1])
         u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
         M = build_matrix(-u, -v, -theta)
         current_T = current_T @ M
         transforms.append(current_T.copy())
+        im1_gray = im2_gray
 
-    if convergence_point is not None:
-        transforms = _anchor_convergence(transforms, convergence_point)
+    # todo: fix this
+    # # center the path around the middle frame
+    # mid_idx = len(transforms) // 2
+    # T_mid = transforms[mid_idx]
+    # T_mid_inv = np.linalg.inv(T_mid)
+    #
+    # # multiply each transform by T_mid_inv to center the path
+    # new_transforms = [T_mid_inv @ T for T in transforms]
+
+    # # anchor convergence after centering
+    # if convergence_point is not None:
+    #     new_transforms = _anchor_convergence(new_transforms, convergence_point)
 
     return transforms
 
@@ -486,22 +517,85 @@ def dynamic_mosaic(frames, transforms, canvas,
     return movie_frames
 
 
-# TODO:
-# - blur video as first step (especially Kessaria)
-# - split LK to rotation and translation components
-#       a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
-#           are in same distance from camera
-#       b. translation: with LK on the ROTATED frames
-# - NOTE: banana in result is OK. the right form is 'smiling' banana :)
-# - make these ^ functions return te transforms mtx for future reusal.
-# - set middle frame as the reference for stabilization
-# - OPTIMIZE RUNTIME to ~100sec: remove loops, use numpy vector operations,
-#          reduce write/any access to disk
+# TODO: test this.
+def crop_panoramas_to_common_area(panoramas):
+    """
+    Implements Instruction 6: Neutralize the shift between panoramas.
+    We find the common valid area across all panoramas and crop them.
+    Since panoramas are mainly shifted horizontally, we focus on X cropping.
+    """
+    if not panoramas:
+        return panoramas
+
+    # Assuming all panoramas have the same height and mostly align vertically
+    # We need to find the "valid" width range.
+
+    # Heuristic:
+    # The strip shift causes the image content to shift.
+    # We want to keep the center intersection.
+
+    h, w = panoramas[0].shape[:2]
+
+    # In a proper stitching, usually:
+    # Frame 0 (Leftmost strip) has valid pixels starting early but ending early.
+    # Frame N (Rightmost strip) has valid pixels starting late but ending late.
+
+    # Simple approach based on the instructions:
+    # "Crop right columns from right panorama, left columns from left panorama"
+
+    # Let's find the first non-black column of the Last Panorama (Rightmost view)
+    # and the last non-black column of the First Panorama (Leftmost view).
+
+    # Note: This depends on how your 'render' outputs the black background.
+    # Assuming standard output where background is 0.
+
+    # Find Left Crop limit (determined by the Rightmost View, which starts latest)
+    # Actually, visual parallax works inversely to strip selection:
+    # Left Strip = Right Viewpoint (Content moves Left)
+    # Right Strip = Left Viewpoint (Content moves Right)
+
+    # Let's keep it simple: Find the max 'first_col' and min 'last_col' across all frames
+
+    max_first_col = 0
+    min_last_col = w
+
+    for pan in panoramas:
+        # Convert to gray just for check
+        if pan.ndim == 3:
+            check_img = pan.mean(axis=2)
+        else:
+            check_img = pan
+
+        # Sum columns to find where data exists
+        col_sums = check_img.sum(axis=0)
+        valid_cols = np.where(col_sums > 0)[0]
+
+        if len(valid_cols) > 0:
+            first_col = valid_cols[0]
+            last_col = valid_cols[-1]
+
+            max_first_col = max(max_first_col, first_col)
+            min_last_col = min(min_last_col, last_col)
+
+    # Check if we have a valid overlap
+    if max_first_col >= min_last_col:
+        print("Warning: No common overlap found. Returning original frames.")
+        return panoramas
+
+    print(
+        f"Cropping panoramas to common width: {max_first_col} to {min_last_col}")
+
+    cropped_panoramas = []
+    for pan in panoramas:
+        cropped_panoramas.append(pan[:, max_first_col:min_last_col])
+
+    return cropped_panoramas
+
 
 def generate_panorama(input_frames_path, n_out_frames):
     """
     Main entry point for ex4
-    :param input_frames_path : path to a dir with input video frames.
+    :param input_frames_path: path to a dir with input video frames.
     We will test your code with a dir that has K frames, each in the format
     "frame_i:05d.jpg" (e.g., frame_00000.jpg, frame_00001.jpg, frame_00002.jpg, ...).
     :param n_out_frames: number of generated panorama frames
@@ -512,21 +606,35 @@ def generate_panorama(input_frames_path, n_out_frames):
     GRAYSCALE = False
     STEP_SIZE = 16
     BORDER_CUT = 15
+    START_ANCHOR = 0.2  # Safe margins
+    STOP_ANCHOR = 0.8
 
     # 1. Load & Stabilize
     raw = load_frames_for_test(input_frames_path)
     stable = stabilize_video(raw, step_size=STEP_SIZE, border_cut=BORDER_CUT,
                              enable_rotation=True)
+
     # 2. Compute Path
     matrices = compute_camera_path(stable, step_size=STEP_SIZE,
                                    border_cut=BORDER_CUT)
     geo = compute_canvas_geometry(matrices, raw.shape[1], raw.shape[2])
+
     # 3. Render
     movie_frames = dynamic_mosaic(stable, matrices, geo,
                                   num_views=n_out_frames,
-                                  padding=PADDING, grayscale=GRAYSCALE)
-    # Todo: convert each frame to PIL image
-    return movie_frames
+                                  start=START_ANCHOR,
+                                  stop=STOP_ANCHOR,
+                                  padding=PADDING,
+                                  grayscale=GRAYSCALE,
+                                  back_n_forth=False)
+
+    # 4. Post-Process (Neutralize Shift)
+    # todo: test this function
+    # movie_frames = crop_panoramas_to_common_area(movie_frames)
+
+    # 5. Convert to PIL
+    return [PIL.Image.fromarray(f) for f in movie_frames]
+    # return movie_frames # numpy arrays for easier testing
 
 
 def load_frames_for_test(input_frames_path):
@@ -545,3 +653,29 @@ def load_frames_for_test(input_frames_path):
     if not frames:
         raise ValueError("No frames found in the specified directory.")
     return np.stack(frames, axis=0)
+
+# TODO:
+#     in my code, these lines appear in 2 places:
+#     im1_gray = rgb2gray(frames_rgb[0])
+#         for idx in range(frames_rgb.shape[0] - 1):
+#             im2_gray = rgb2gray(frames_rgb[idx + 1])
+#             u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
+#     both in stabilize_video and compute_camera_path. in each of them i call optical_path. this is redundant.
+
+# TODO:
+#  - blur video as first step (especially Kessaria)
+#  - split LK to rotation and translation components
+#        a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
+#            are in same distance from camera
+#        b. translation: with LK on the ROTATED frames
+#  - make these ^ functions return te transforms mtx for future reusal.
+#  - set middle frame as the reference for stabilization
+#  - NOTE: banana in result is OK. the right form is 'smiling' banana :)
+
+# todo - OPTIMIZE RUNTIME to ~100sec
+#  - in warp_image: set order=1, prefilter=False
+#  - in render_strip_panorama: set order=2-3, prefilter=True for good quality
+#  - in pyramid levels: stop earlier, when dims are < 16/32 pixels.
+#  - reduce video resolution when computing transforms (e.g., by 2x)
+#  - remove loops, use numpy vector operations,
+#           reduce write/any access to disk
