@@ -450,7 +450,7 @@ def optical_flow(
 
 def dynamic_mosaic(frames, transforms, canvas,
                    padding=2, grayscale=False,
-                   start=0.2, stop=0.8, num_views=10):
+                   start=0.2, stop=0.8, num_views=10, back_n_forth=False):
     """
     Create a dynamic mosaic video by rendering strip panoramas with varying strip anchors.
     Args:
@@ -462,8 +462,10 @@ def dynamic_mosaic(frames, transforms, canvas,
         start (float): Starting anchor position (0.0 to 1.0).
         stop (float): Ending anchor position (0.0 to 1.0).
         num_views (int): Number of frames to generate between start and stop.
+        back_n_forth (bool): If True, the video will play forward and then backward.
     Returns:
         List[np.ndarray]: List of panorama frames as uint8 arrays.
+        :param back_n_forth:
     """
     movie_frames = []
 
@@ -479,10 +481,12 @@ def dynamic_mosaic(frames, transforms, canvas,
         movie_frames.append(pan_uint8)
 
     # append all frames in reverse order to create a back-and-forth effect
-    movie_frames += movie_frames[::-1]
+    if back_n_forth:
+        movie_frames += movie_frames[::-1]
     return movie_frames
 
-#TODO:
+
+# TODO:
 # - blur video as first step (especially Kessaria)
 # - split LK to rotation and translation components
 #       a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
@@ -493,3 +497,51 @@ def dynamic_mosaic(frames, transforms, canvas,
 # - set middle frame as the reference for stabilization
 # - OPTIMIZE RUNTIME to ~100sec: remove loops, use numpy vector operations,
 #          reduce write/any access to disk
+
+def generate_panorama(input_frames_path, n_out_frames):
+    """
+    Main entry point for ex4
+    :param input_frames_path : path to a dir with input video frames.
+    We will test your code with a dir that has K frames, each in the format
+    "frame_i:05d.jpg" (e.g., frame_00000.jpg, frame_00001.jpg, frame_00002.jpg, ...).
+    :param n_out_frames: number of generated panorama frames
+    :return: A list of generated panorma frames (of size n_out_frames),
+    each list item should be a PIL image of a generated panorama.
+    """
+    PADDING = 2
+    GRAYSCALE = False
+    STEP_SIZE = 16
+    BORDER_CUT = 15
+
+    # 1. Load & Stabilize
+    raw = load_frames_for_test(input_frames_path)
+    stable = stabilize_video(raw, step_size=STEP_SIZE, border_cut=BORDER_CUT,
+                             enable_rotation=True)
+    # 2. Compute Path
+    matrices = compute_camera_path(stable, step_size=STEP_SIZE,
+                                   border_cut=BORDER_CUT)
+    geo = compute_canvas_geometry(matrices, raw.shape[1], raw.shape[2])
+    # 3. Render
+    movie_frames = dynamic_mosaic(stable, matrices, geo,
+                                  num_views=n_out_frames,
+                                  padding=PADDING, grayscale=GRAYSCALE)
+    # Todo: convert each frame to PIL image
+    return movie_frames
+
+
+def load_frames_for_test(input_frames_path):
+    """
+    Load video frames from a directory for testing purposes.
+    :param input_frames_path: Path to the directory containing video frames.
+    :return: A numpy array of loaded video frames.
+    """
+    frames = []
+    for filename in sorted(os.listdir(input_frames_path)):
+        if filename.endswith('.jpg'):
+            frame_path = os.path.join(input_frames_path, filename)
+            frame = imageio.v2.imread(frame_path)
+            frame = _ensure_rgb(frame).astype(np.float64) / 255.0
+            frames.append(frame)
+    if not frames:
+        raise ValueError("No frames found in the specified directory.")
+    return np.stack(frames, axis=0)
