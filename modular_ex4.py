@@ -15,12 +15,11 @@ REDUCE_KERNEL = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
 "------------------------------------------------------------------------------"
 
 
-def load_video_frames(
-        filename: str,
-        inputs_folder: str = "Exercise Inputs",
-        max_frames: Optional[int] = None,
-        downscale_factor: int = 1,
-) -> np.ndarray:
+def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
+                      spatial_downscale: int = 1) -> np.ndarray:
+    """
+    Load video frames from a file, with optional spatial and temporal downscaling.
+    """
     video_path = os.path.join(inputs_folder, filename)
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
@@ -29,10 +28,8 @@ def load_video_frames(
     frames: List[np.ndarray] = []
     try:
         for idx, frame in enumerate(reader):
-            if max_frames is not None and idx >= max_frames:
-                break
-            if downscale_factor > 1:
-                frame = frame[::downscale_factor, ::downscale_factor, ...]
+            if spatial_downscale > 1:  # in-frame, drop pixels
+                frame = frame[::spatial_downscale, ::spatial_downscale, ...]
             frame = _ensure_rgb(frame).astype(np.float64) / 255.0
             frames.append(frame)
     finally:
@@ -63,6 +60,7 @@ def warp_image(im: np.ndarray, u: float, v: float, theta: float) -> np.ndarray:
             for ch in range(3)
         ]
         return np.stack(warped_channels, axis=2)
+
     return map_coordinates(im, coords, order=1, prefilter=False).reshape(h, w)
 
 
@@ -215,6 +213,7 @@ def _estimate_strip_width(
 "------------------------------------------------------------------------------"
 "------------------------------------------------------------------------------"
 
+
 def compute_motion(frames_rgb, step_size, border_cut):
     """
     Calculates raw_frames motion between consecutive frames.
@@ -224,7 +223,7 @@ def compute_motion(frames_rgb, step_size, border_cut):
 
     im1_gray = rgb2gray(frames_rgb[0])
     for i in range(len(frames_rgb) - 1):
-        im2_gray = rgb2gray(frames_rgb[i+1])
+        im2_gray = rgb2gray(frames_rgb[i + 1])
         u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
         motion_data.append((u, v, theta))
         im1_gray = im2_gray
@@ -249,10 +248,11 @@ def stabilize_video(frames_rgb, motion_data, enable_rotation=True):
         fix_v = current_v
         fix_theta = current_theta
 
-        warped = warp_image(frames_rgb[i+1], fix_u, fix_v, fix_theta)
+        warped = warp_image(frames_rgb[i + 1], fix_u, fix_v, fix_theta)
         stabilized_frames.append(warped)
 
     return np.array(stabilized_frames)
+
 
 def compute_camera_path(motion_data, convergence_point=None):
     """
@@ -441,8 +441,9 @@ def optical_flow(
         step_size: int,
         border_cut: int,
 ) -> Tuple[float, float, float]:
+    MIN_PIXELS = 16.0
     min_dim = min(im1.shape[:2])
-    levels = max(1, int(np.log2(max(min_dim // step_size, 1))) + 1)
+    levels = max(1, int(np.floor(np.log2(max(min_dim / MIN_PIXELS, 1.0)))) + 1)
     pyr1 = gaussian_pyramid(im1, levels)
     pyr2 = gaussian_pyramid(im2, levels)
 
@@ -656,7 +657,7 @@ def load_frames_for_test(input_frames_path):
 #  - NOTE: banana in result is OK. the right form is 'smiling' banana :)
 
 # todo - OPTIMIZE RUNTIME to ~100sec
-#  - in warp_image: set order=1, prefilter=False
+#  V - in warp_image: set order=1, prefilter=False
 #  - in render_strip_panorama: set order=2-3, prefilter=True for good quality
 #  - in pyramid levels: stop earlier, when dims are < 16/32 pixels.
 #  - reduce video resolution when computing transforms (e.g., by 2x)
