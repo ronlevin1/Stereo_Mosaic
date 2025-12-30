@@ -208,7 +208,7 @@ def _ensure_rgb(frame: np.ndarray) -> np.ndarray:
         return frame[:, :, :3]
     return frame
 
-
+# TODO: fix!
 def _anchor_convergence(
         transforms: Sequence[np.ndarray],
         convergence_point: Tuple[float, float],
@@ -259,7 +259,7 @@ def _estimate_strip_width(
         dists.append(abs(p_next[0] - p_curr[0]))
 
     max_dist = max(dists) if dists else frame_w
-    strip_width = int(np.ceil(max_dist * 1.3)) + strip_padding
+    strip_width = int(np.ceil(max_dist * 1.8)) + strip_padding
     return max(1, min(strip_width, frame_w))
 
 
@@ -635,31 +635,44 @@ def generate_panorama(input_frames_path, n_out_frames):
     :return: A list of generated panorma frames (of size n_out_frames),
     each list item should be a PIL image of a generated panorama.
     """
-    PADDING = 2
+    PADDING = 4
     GRAYSCALE = False
-    STEP_SIZE = 16 #
+    STEP_SIZE = 16
     BORDER_CUT = 15
+    ENABLE_ROTATION = False
+    NUM_OF_BLURS = 1
     START_ANCHOR = 0.2  # Safe margins
     STOP_ANCHOR = 0.8
 
-    # 1. Load & Stabilize
-    raw = load_frames_for_test(input_frames_path)
-    stable = stabilize_video(raw, step_size=STEP_SIZE, border_cut=BORDER_CUT,
-                             enable_rotation=True)
+    # 0. Load video & blur
+    raw_frames = load_frames_for_test(input_frames_path)
+    for _ in range(NUM_OF_BLURS):
+        raw_frames = blur_video(raw_frames, REDUCE_KERNEL)
 
-    # 2. Compute Path
-    matrices = compute_camera_path(stable, step_size=STEP_SIZE,
-                                   border_cut=BORDER_CUT)
-    geo = compute_canvas_geometry(matrices, raw.shape[1], raw.shape[2])
+    # 1. & Compute Motion
+    motion_data = compute_motion(raw_frames, STEP_SIZE, BORDER_CUT)
 
-    # 3. Render
-    movie_frames = dynamic_mosaic(stable, matrices, geo,
+    # 1.1 invert if motion is right-to-left
+    if estimate_motion_dir(motion_data) == "RTL":
+        raw_frames = raw_frames[::-1]
+        motion_data = [(-u, -v, -theta) for u, v, theta in motion_data[::-1]]
+
+    # 2. Stabilize Video
+    stable_frames = stabilize_video(raw_frames, motion_data, enable_rotation=ENABLE_ROTATION)
+
+    # 3. Compute Path for motion composition: align all frames to same coordinate system
+    stabilized_motion = [(u, 0, 0) for u, v, theta in motion_data]
+    transforms = compute_camera_path(stabilized_motion)
+    geo = compute_canvas_geometry(transforms, raw_frames.shape[1], raw_frames.shape[2])
+
+    # 4. Create Movie of Multi-Perspective mosaics
+    movie_frames = dynamic_mosaic(stable_frames, transforms, geo,
                                   num_views=n_out_frames,
                                   start=START_ANCHOR,
                                   stop=STOP_ANCHOR,
                                   padding=PADDING,
                                   grayscale=GRAYSCALE,
-                                  back_n_forth=False)
+                                  back_n_forth=True)
 
     # 4. Post-Process (Neutralize Shift)
     # todo: test this function
@@ -689,31 +702,13 @@ def load_frames_for_test(input_frames_path):
 
 # TODO: remove step_size if not used.
 
-# TODO: remove redundancy of calling optical_flow.
-#       build a func compute_motion for the core math and call it from both
-#       stabilize_video and compute_camera_path.
-#       as is now:
-#     in my code, these lines appear in 2 places:
-#     im1_gray = rgb2gray(frames_rgb[0])
-#         for idx in range(frames_rgb.shape[0] - 1):
-#             im2_gray = rgb2gray(frames_rgb[idx + 1])
-#             u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
-#     both in stabilize_video and compute_camera_path. in each of them i call optical_path. this is redundant.
-
 # TODO:
-#  - blur video as first step (especially Kessaria)
 #  - split LK to rotation and translation components
 #        a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
 #            are in same distance from camera
 #        b. translation: with LK on the ROTATED frames
-#  - make these ^ functions return te transforms mtx for future reusal.
 #  - set middle frame as the reference for stabilization
-#  - NOTE: banana in result is OK. the right form is 'smiling' banana :)
 
 # todo - OPTIMIZE RUNTIME to ~100sec
-#  V - in warp_image: set order=1, prefilter=False
-#  - in render_strip_panorama: set order=2-3, prefilter=True for good quality
-#  - in pyramid levels: stop earlier, when dims are < 16/32 pixels.
-#  - reduce video resolution when computing transforms (e.g., by 2x)
 #  - remove loops, use numpy vector operations,
 #           reduce write/any access to disk
