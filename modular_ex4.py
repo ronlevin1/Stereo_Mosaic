@@ -8,7 +8,6 @@ from scipy import signal
 from scipy.ndimage import convolve1d, map_coordinates
 from skimage.color import rgb2gray
 
-
 MIN_PYRAMID_SIZE = 32
 REDUCE_KERNEL = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
 
@@ -40,6 +39,21 @@ def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
     if not frames:
         raise ValueError("No frames loaded; check input parameters")
     return np.stack(frames, axis=0)
+
+def estimate_motion_dir(motion_data):
+    """
+    Estimate motion between consecutive frames in a video.
+    Returns a list of (u, v, theta) tuples.
+    """
+    avg_u = np.mean([m[0] for m in motion_data])
+    is_right_to_left = avg_u > 0
+
+    if is_right_to_left:
+        print("Right-to-Left motion detected. Flipping data internally...")
+        return "RTL"
+    else:
+        print("Left-to-Right motion detected.")
+        return "LTR"
 
 
 def warp_image(im: np.ndarray, u: float, v: float, theta: float) -> np.ndarray:
@@ -91,6 +105,7 @@ def blur(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
         blurred[..., ch] = _blur_single_channel(img[..., ch], kernel)
     return blurred
 
+
 def blur_video(frames: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     blurred_frames = np.zeros_like(frames)
     for i in range(frames.shape[0]):
@@ -108,16 +123,18 @@ def _blur_single_channel(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return convolve1d(tmp, kernel, axis=0, mode="nearest")
 
 
-def _lucas_kanade_step(
+def _lucas_kanade_optimization(
         I1: np.ndarray,
         I2: np.ndarray,
         border_cut: int,
-) -> Tuple[float, float, float]:
+        u: float = 0.0,
+        v: float = 0.0,
+        theta: float = 0.0,
+        max_iter=15, epsilon=1e-2) -> Tuple[float, float, float]:
     kernel_x = np.array([[1.0, 0.0, -1.0]]) / 2.0
     kernel_y = kernel_x.T
     Ix = signal.convolve2d(I1, kernel_x, mode="same", boundary="symm")
     Iy = signal.convolve2d(I1, kernel_y, mode="same", boundary="symm")
-    It = I2 - I1
 
     h, w = I1.shape
     y, x = np.mgrid[0:h, 0:w]
@@ -130,7 +147,6 @@ def _lucas_kanade_step(
     Ix = Ix[slices]
     Iy = Iy[slices]
     I_theta = I_theta[slices]
-    It = It[slices]
 
     Ix2 = np.sum(Ix * Ix)
     Iy2 = np.sum(Iy * Iy)
@@ -143,19 +159,49 @@ def _lucas_kanade_step(
         [[Ix2, IxIy, IxIth], [IxIy, Iy2, IyIth], [IxIth, IyIth, Ith2]],
         dtype=np.float64,
     )
-    IxIt = np.sum(Ix * It)
-    IyIt = np.sum(Iy * It)
-    IthIt = np.sum(I_theta * It)
-    B = np.array([-IxIt, -IyIt, -IthIt], dtype=np.float64)
 
-    try:
-        res = np.linalg.solve(A, B)
-        return float(res[0]), float(res[1]), float(res[2])
-    except np.linalg.LinAlgError:
-        return 0.0, 0.0, 0.0
+    for _ in range(max_iter):
+        warped = warp_image(I2, u, v, theta)
+        It = warped - I1
+        It = It[slices]
+
+        IxIt = np.sum(Ix * It)
+        IyIt = np.sum(Iy * It)
+        IthIt = np.sum(I_theta * It)
+        B = np.array([-IxIt, -IyIt, -IthIt], dtype=np.float64)
+
+        try:
+            res = np.linalg.solve(A, B)
+            du, dv, dtheta = float(res[0]), float(res[1]), float(res[2])
+        except np.linalg.LinAlgError:
+            break
+
+        u += du
+        v += dv
+        theta += dtheta
+
+        if abs(du) < epsilon and abs(dv) < epsilon and abs(dtheta) < epsilon:
+            break
+
+    return u, v, theta
 
 
 def _ensure_rgb(frame: np.ndarray) -> np.ndarray:
+    """
+    Ensures that the input frame is in RGB format.
+
+    Parameters:
+        frame (np.ndarray): The input image or video frame. It can be:
+            - Grayscale (2D array of shape (H, W))
+            - RGB (3D array of shape (H, W, 3))
+            - RGBA (3D array of shape (H, W, 4))
+
+    Returns:
+        np.ndarray: The frame converted to RGB format:
+            - Grayscale frames are converted to RGB by duplicating the single channel.
+            - RGBA frames are converted to RGB by discarding the alpha channel.
+            - RGB frames are returned unchanged.
+    """
     if frame.ndim == 2:
         return np.repeat(frame[:, :, None], repeats=3, axis=2)
     if frame.shape[2] == 4:
@@ -232,7 +278,7 @@ def compute_motion(frames_rgb, step_size, border_cut):
     im1_gray = rgb2gray(frames_rgb[0])
     for i in range(len(frames_rgb) - 1):
         im2_gray = rgb2gray(frames_rgb[i + 1])
-        u, v, theta = optical_flow(im1_gray, im2_gray, step_size, border_cut)
+        u, v, theta = align_pair(im1_gray, im2_gray, step_size, border_cut)
         motion_data.append((u, v, theta))
         im1_gray = im2_gray
 
@@ -443,10 +489,10 @@ def render_strip_panorama(
     return canvas
 
 
-def optical_flow(
+def align_pair(
         im1: np.ndarray,
         im2: np.ndarray,
-        step_size: int,
+        step_size: int, # TODO: remove if not used
         border_cut: int,
 ) -> Tuple[float, float, float]:
     min_dim = min(im1.shape[:2])
@@ -455,15 +501,14 @@ def optical_flow(
     pyr2 = gaussian_pyramid(im2, levels)
 
     u = v = theta = 0.0
+    # iterate pyramid from coarse to fine
     for level in reversed(range(len(pyr1))):
         if level < len(pyr1) - 1:
             u *= 2.0
             v *= 2.0
-        warped = warp_image(pyr2[level], u, v, theta)
-        du, dv, dtheta = _lucas_kanade_step(pyr1[level], warped, border_cut)
-        u += du
-        v += dv
-        theta += dtheta
+        u, v, theta = _lucas_kanade_optimization(pyr1[level], pyr2[level], border_cut,
+                                                 u, v, theta)
+
     return u, v, theta
 
 
@@ -505,7 +550,7 @@ def dynamic_mosaic(frames, transforms, canvas,
     return movie_frames
 
 
-# TODO: test this.
+# TODO: test this. or remove if not needed.
 def crop_panoramas_to_common_area(panoramas):
     """
     Implements Instruction 6: Neutralize the shift between panoramas.
@@ -592,7 +637,7 @@ def generate_panorama(input_frames_path, n_out_frames):
     """
     PADDING = 2
     GRAYSCALE = False
-    STEP_SIZE = 16
+    STEP_SIZE = 16 #
     BORDER_CUT = 15
     START_ANCHOR = 0.2  # Safe margins
     STOP_ANCHOR = 0.8
@@ -641,6 +686,8 @@ def load_frames_for_test(input_frames_path):
     if not frames:
         raise ValueError("No frames found in the specified directory.")
     return np.stack(frames, axis=0)
+
+# TODO: remove step_size if not used.
 
 # TODO: remove redundancy of calling optical_flow.
 #       build a func compute_motion for the core math and call it from both
