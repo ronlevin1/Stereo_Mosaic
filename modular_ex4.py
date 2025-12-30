@@ -8,6 +8,8 @@ from scipy import signal
 from scipy.ndimage import convolve1d, map_coordinates
 from skimage.color import rgb2gray
 
+
+MIN_PYRAMID_SIZE = 32
 REDUCE_KERNEL = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
 
 "------------------------------------------------------------------------------"
@@ -18,7 +20,7 @@ REDUCE_KERNEL = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
 def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
                       spatial_downscale: int = 1) -> np.ndarray:
     """
-    Load video frames from a file, with optional spatial and temporal downscaling.
+    Load video frames from a file, with optional spatial downscaling.
     """
     video_path = os.path.join(inputs_folder, filename)
     if not os.path.exists(video_path):
@@ -68,7 +70,7 @@ def gaussian_pyramid(img: np.ndarray, num_levels: int) -> List[np.ndarray]:
     pyramid = [img.astype(np.float64)]
     current = pyramid[0]
     for _ in range(1, num_levels):
-        if min(current.shape[:2]) < 2:
+        if min(current.shape[:2]) < MIN_PYRAMID_SIZE:
             break
         current = reduce(current)
         pyramid.append(current)
@@ -88,6 +90,12 @@ def blur(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     for ch in range(img.shape[2]):
         blurred[..., ch] = _blur_single_channel(img[..., ch], kernel)
     return blurred
+
+def blur_video(frames: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+    blurred_frames = np.zeros_like(frames)
+    for i in range(frames.shape[0]):
+        blurred_frames[i] = blur(frames[i], kernel)
+    return blurred_frames
 
 
 def build_matrix(u: float, v: float, theta: float) -> np.ndarray:
@@ -441,9 +449,8 @@ def optical_flow(
         step_size: int,
         border_cut: int,
 ) -> Tuple[float, float, float]:
-    MIN_PIXELS = 16.0
     min_dim = min(im1.shape[:2])
-    levels = max(1, int(np.floor(np.log2(max(min_dim / MIN_PIXELS, 1.0)))) + 1)
+    levels = max(1, int(np.floor(np.log2(min_dim / MIN_PYRAMID_SIZE))) + 1)
     pyr1 = gaussian_pyramid(im1, levels)
     pyr2 = gaussian_pyramid(im2, levels)
 
