@@ -31,9 +31,9 @@ def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
         for idx, frame in enumerate(reader):
             if spatial_downscale > 1:  # in-frame, drop pixels
                 frame = frame[::spatial_downscale, ::spatial_downscale, ...]
-            # frame = _ensure_rgb(frame).astype(np.float64) / 255.0 # todo
+            frame = _ensure_rgb(frame).astype(np.float64) / 255.0  # todo
             frames.append(frame)
-        frames /= 255.0  # normalize to [0, 1]
+        # frames = np.array(frames, dtype=np.float64) / 255.0  # normalize to [0, 1]
     finally:
         reader.close()
 
@@ -271,19 +271,31 @@ def _estimate_strip_width(
 "------------------------------------------------------------------------------"
 
 
-def compute_motion(frames_rgb, border_cut):
+def compute_motion(frames_rgb, border_cut, use_bottom_part: bool = True):
     """
-    Calculates raw_frames motion between consecutive frames.
+    Calculates motion between consecutive frames.
+    If use_bottom_part=True, motion is estimated only from the bottom part of frame.
     Returns a list of (u, v, theta) tuples.
     """
     motion_data = []
 
-    im1_gray = rgb2gray(frames_rgb[0])
+    im1_gray_full = rgb2gray(frames_rgb[0])
     for i in range(len(frames_rgb) - 1):
-        im2_gray = rgb2gray(frames_rgb[i + 1])
+        im2_gray_full = rgb2gray(frames_rgb[i + 1])
+
+        if use_bottom_part:
+            h = im1_gray_full.shape[0]
+            y0 = h // 3
+            im1_gray = im1_gray_full[y0:, :]
+            im2_gray = im2_gray_full[y0:, :]
+        else:
+            im1_gray = im1_gray_full
+            im2_gray = im2_gray_full
+
         u, v, theta = align_pair(im1_gray, im2_gray, border_cut)
         motion_data.append((u, v, theta))
-        im1_gray = im2_gray
+
+        im1_gray_full = im2_gray_full
 
     return motion_data
 
@@ -388,7 +400,7 @@ def render_strip_panorama(
     frame_h, frame_w = frames.shape[1:3]
     canvas_h, canvas_w, dy, dx = canvas_geometry
 
-    canvas = (
+    pano_canvas = (
         np.zeros((canvas_h, canvas_w), dtype=np.float64)
         if grayscale_out
         else np.zeros((canvas_h, canvas_w, 3), dtype=np.float64)
@@ -416,10 +428,11 @@ def render_strip_panorama(
 
         strip_start = max(0, target_center - strip_width // 2)
         strip_end = min(frame_w, strip_start + strip_width)
-        if idx == 0:
-            strip_start = 0
-        if idx == len(frames) - 1:
-            strip_end = frame_w
+        # TODO: decide if keep/remove lines below
+        # if idx == 0:
+        #     strip_start = 0
+        # if idx == len(frames) - 1:
+        #     strip_end = frame_w
 
         strip_corners = np.array(
             [
@@ -474,9 +487,9 @@ def render_strip_panorama(
                 order=interp_order,
                 prefilter=prefilter,
             )
-            target = canvas[min_y:max_y, min_x:max_x]
+            target = pano_canvas[min_y:max_y, min_x:max_x]
             target[mask_grid] = sampled[mask_grid]
-            canvas[min_y:max_y, min_x:max_x] = target
+            pano_canvas[min_y:max_y, min_x:max_x] = target
         else:
             for ch in range(3):
                 sampled = map_coordinates(
@@ -485,11 +498,13 @@ def render_strip_panorama(
                     order=interp_order,
                     prefilter=prefilter,
                 )
-                target = canvas[min_y:max_y, min_x:max_x, ch]
+                target = pano_canvas[min_y:max_y, min_x:max_x, ch]
                 target[mask_grid] = sampled[mask_grid]
-                canvas[min_y:max_y, min_x:max_x, ch] = target
+                pano_canvas[min_y:max_y, min_x:max_x, ch] = target
 
-    return canvas
+    # Crop fully-black columns (left/right) before converting to uint8
+    pano_canvas = crop_black_columns(pano_canvas, black_thresh=0, margin=10)
+    return pano_canvas
 
 
 def align_pair(
@@ -627,6 +642,38 @@ def crop_panoramas_to_common_area(panoramas):
     return cropped_panoramas
 
 
+def crop_black_columns(img: np.ndarray, black_thresh: int = 0,
+                       margin: int = 0) -> np.ndarray:
+    """
+    Crop ONLY fully-black columns from left/right.
+    A column is considered black if ALL its pixels are <= black_thresh (across channels).
+    """
+    if img.ndim == 2:
+        non_black = img > black_thresh  # (H, W)
+    elif img.ndim == 3:
+        non_black = np.any(img > black_thresh, axis=2)  # (H, W)
+    else:
+        raise ValueError(f"Unsupported image shape: {img.shape}")
+
+    # columns that have any non-black pixel
+    col_has_content = np.any(non_black, axis=0)  # (W,)
+
+    if not np.any(col_has_content):
+        return img  # all columns are black (or below thresh)
+
+    xs = np.where(col_has_content)[0]
+    x0, x1 = xs[0], xs[-1] + 1
+
+    if margin > 0:
+        w = col_has_content.shape[0]
+        x0 = max(0, x0 - margin)
+        x1 = min(w, x1 + margin)
+
+    if img.ndim == 2:
+        return img[:, x0:x1]
+    return img[:, x0:x1, :]
+
+
 def generate_panorama(input_frames_path, n_out_frames):
     """
     Main entry point for ex4
@@ -698,7 +745,6 @@ def load_frames_for_test(input_frames_path):
     if not frames:
         raise ValueError("No frames found in the specified directory.")
     return np.stack(frames, axis=0)
-
 
 # TODO:
 #  - split LK to rotation and translation components
