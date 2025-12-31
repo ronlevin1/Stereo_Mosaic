@@ -31,14 +31,16 @@ def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
         for idx, frame in enumerate(reader):
             if spatial_downscale > 1:  # in-frame, drop pixels
                 frame = frame[::spatial_downscale, ::spatial_downscale, ...]
-            frame = _ensure_rgb(frame).astype(np.float64) / 255.0
+            # frame = _ensure_rgb(frame).astype(np.float64) / 255.0 # todo
             frames.append(frame)
+        frames /= 255.0  # normalize to [0, 1]
     finally:
         reader.close()
 
     if not frames:
         raise ValueError("No frames loaded; check input parameters")
     return np.stack(frames, axis=0)
+
 
 def estimate_motion_dir(motion_data):
     """
@@ -208,6 +210,7 @@ def _ensure_rgb(frame: np.ndarray) -> np.ndarray:
         return frame[:, :, :3]
     return frame
 
+
 # TODO: fix!
 def _anchor_convergence(
         transforms: Sequence[np.ndarray],
@@ -268,7 +271,7 @@ def _estimate_strip_width(
 "------------------------------------------------------------------------------"
 
 
-def compute_motion(frames_rgb, step_size, border_cut):
+def compute_motion(frames_rgb, border_cut):
     """
     Calculates raw_frames motion between consecutive frames.
     Returns a list of (u, v, theta) tuples.
@@ -278,7 +281,7 @@ def compute_motion(frames_rgb, step_size, border_cut):
     im1_gray = rgb2gray(frames_rgb[0])
     for i in range(len(frames_rgb) - 1):
         im2_gray = rgb2gray(frames_rgb[i + 1])
-        u, v, theta = align_pair(im1_gray, im2_gray, step_size, border_cut)
+        u, v, theta = align_pair(im1_gray, im2_gray, border_cut)
         motion_data.append((u, v, theta))
         im1_gray = im2_gray
 
@@ -492,7 +495,6 @@ def render_strip_panorama(
 def align_pair(
         im1: np.ndarray,
         im2: np.ndarray,
-        step_size: int, # TODO: remove if not used
         border_cut: int,
 ) -> Tuple[float, float, float]:
     min_dim = min(im1.shape[:2])
@@ -506,8 +508,8 @@ def align_pair(
         if level < len(pyr1) - 1:
             u *= 2.0
             v *= 2.0
-        u, v, theta = _lucas_kanade_optimization(pyr1[level], pyr2[level], border_cut,
-                                                 u, v, theta)
+        u, v, theta = _lucas_kanade_optimization(pyr1[level], pyr2[level],
+                                                 border_cut, u, v, theta)
 
     return u, v, theta
 
@@ -637,7 +639,6 @@ def generate_panorama(input_frames_path, n_out_frames):
     """
     PADDING = 4
     GRAYSCALE = False
-    STEP_SIZE = 16
     BORDER_CUT = 15
     ENABLE_ROTATION = False
     NUM_OF_BLURS = 1
@@ -649,8 +650,8 @@ def generate_panorama(input_frames_path, n_out_frames):
     for _ in range(NUM_OF_BLURS):
         raw_frames = blur_video(raw_frames, REDUCE_KERNEL)
 
-    # 1. & Compute Motion
-    motion_data = compute_motion(raw_frames, STEP_SIZE, BORDER_CUT)
+    # 1. Compute Motion
+    motion_data = compute_motion(raw_frames, BORDER_CUT)
 
     # 1.1 invert if motion is right-to-left
     if estimate_motion_dir(motion_data) == "RTL":
@@ -658,29 +659,27 @@ def generate_panorama(input_frames_path, n_out_frames):
         motion_data = [(-u, -v, -theta) for u, v, theta in motion_data[::-1]]
 
     # 2. Stabilize Video
-    stable_frames = stabilize_video(raw_frames, motion_data, enable_rotation=ENABLE_ROTATION)
+    stable_frames = stabilize_video(raw_frames, motion_data,
+                                    enable_rotation=ENABLE_ROTATION)
 
     # 3. Compute Path for motion composition: align all frames to same coordinate system
     stabilized_motion = [(u, 0, 0) for u, v, theta in motion_data]
     transforms = compute_camera_path(stabilized_motion)
-    geo = compute_canvas_geometry(transforms, raw_frames.shape[1], raw_frames.shape[2])
+    geo = compute_canvas_geometry(transforms, raw_frames.shape[1],
+                                  raw_frames.shape[2])
 
     # 4. Create Movie of Multi-Perspective mosaics
-    movie_frames = dynamic_mosaic(stable_frames, transforms, geo,
-                                  num_views=n_out_frames,
-                                  start=START_ANCHOR,
-                                  stop=STOP_ANCHOR,
-                                  padding=PADDING,
-                                  grayscale=GRAYSCALE,
-                                  back_n_forth=True)
+    movie_frames = dynamic_mosaic(
+        stable_frames, transforms, geo,
+        num_views=n_out_frames,
+        start=START_ANCHOR,
+        stop=STOP_ANCHOR,
+        padding=PADDING,
+        grayscale=GRAYSCALE,
+        back_n_forth=True
+    )
 
-    # 4. Post-Process (Neutralize Shift)
-    # todo: test this function
-    # movie_frames = crop_panoramas_to_common_area(movie_frames)
-
-    # 5. Convert to PIL
     return [PIL.Image.fromarray(f) for f in movie_frames]
-    # return movie_frames # numpy arrays for easier testing
 
 
 def load_frames_for_test(input_frames_path):
@@ -700,7 +699,6 @@ def load_frames_for_test(input_frames_path):
         raise ValueError("No frames found in the specified directory.")
     return np.stack(frames, axis=0)
 
-# TODO: remove step_size if not used.
 
 # TODO:
 #  - split LK to rotation and translation components
