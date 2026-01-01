@@ -1,5 +1,4 @@
 import os
-from typing import List, Optional, Sequence, Tuple
 
 import imageio
 import PIL.Image
@@ -16,24 +15,31 @@ REDUCE_KERNEL = np.array([1, 4, 6, 4, 1], dtype=np.float64) / 16.0
 "------------------------------------------------------------------------------"
 
 
-def load_video_frames(filename: str, inputs_folder: str = "Exercise Inputs",
-                      spatial_downscale: int = 1) -> np.ndarray:
-    """
-    Load video frames from a file, with optional spatial downscaling.
+def load_video_frames(filename, inputs_folder="Exercise Inputs",
+                      spatial_downscale=1):
+    """Load video frames from a file, with optional spatial downscaling.
+    Params:
+        filename (str): Video filename.
+        inputs_folder (str): Folder containing the video.
+        spatial_downscale (int): Keep every k-th pixel in both axes.
+    Returns:
+        np.ndarray: Frames array of shape (N, H, W, 3), float64 in [0, 1].
     """
     video_path = os.path.join(inputs_folder, filename)
     if not os.path.exists(video_path):
         raise FileNotFoundError(f"Video not found: {video_path}")
 
     reader = imageio.get_reader(video_path)
-    frames: List[np.ndarray] = []
+    frames = []
     try:
         for idx, frame in enumerate(reader):
             if spatial_downscale > 1:  # in-frame, drop pixels
                 frame = frame[::spatial_downscale, ::spatial_downscale, ...]
-            frame = _ensure_rgb(frame).astype(np.float64) / 255.0  # todo
+            if frame.ndim != 3 or frame.shape[2] != 3:
+                raise ValueError(
+                    f"Expected RGB frame (H,W,3), got shape {frame.shape} at index {idx}")
+            frame = frame.astype(np.float64) / 255.0
             frames.append(frame)
-        # frames = np.array(frames, dtype=np.float64) / 255.0  # normalize to [0, 1]
     finally:
         reader.close()
 
@@ -58,7 +64,16 @@ def estimate_motion_dir(motion_data):
         return "LTR"
 
 
-def warp_image(im: np.ndarray, u: float, v: float, theta: float) -> np.ndarray:
+def warp_image(im, u, v, theta):
+    """Warp an image by translation (u, v) and rotation theta around image center.
+    Params:
+        im (np.ndarray): (H,W) grayscale or (H,W,3) RGB image.
+        u (float): X translation in pixels.
+        v (float): Y translation in pixels.
+        theta (float): Rotation in radians.
+    Returns:
+        np.ndarray: Warped image with same shape as input.
+    """
     h, w = im.shape[:2]
     xv, yv = np.meshgrid(np.arange(w, dtype=np.float64),
                          np.arange(h, dtype=np.float64))
@@ -82,7 +97,14 @@ def warp_image(im: np.ndarray, u: float, v: float, theta: float) -> np.ndarray:
     return map_coordinates(im, coords, order=1, prefilter=False).reshape(h, w)
 
 
-def gaussian_pyramid(img: np.ndarray, num_levels: int) -> List[np.ndarray]:
+def gaussian_pyramid(img, num_levels):
+    """Build a Gaussian pyramid.
+    Params:
+        img (np.ndarray): Input image (H,W) or (H,W,C).
+        num_levels (int): Max pyramid levels.
+    Returns:
+        list[np.ndarray]: Pyramid images from level 0 (original) downsampled.
+    """
     pyramid = [img.astype(np.float64)]
     current = pyramid[0]
     for _ in range(1, num_levels):
@@ -93,12 +115,25 @@ def gaussian_pyramid(img: np.ndarray, num_levels: int) -> List[np.ndarray]:
     return pyramid
 
 
-def reduce(img: np.ndarray) -> np.ndarray:
+def reduce(img):
+    """Blur and downsample image by factor 2.
+    Params:
+        img (np.ndarray): Input image.
+    Returns:
+        np.ndarray: Reduced image.
+    """
     smoothed = blur(img, REDUCE_KERNEL)
     return smoothed[::2, ::2]
 
 
-def blur(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+def blur(img, kernel):
+    """Separable blur per channel.
+    Params:
+        img (np.ndarray): (H,W) or (H,W,C) image.
+        kernel (np.ndarray): 1D blur kernel.
+    Returns:
+        np.ndarray: Blurred image, same shape as input.
+    """
     img = img.astype(np.float64, copy=False)
     if img.ndim == 2:
         return _blur_single_channel(img, kernel)
@@ -108,31 +143,60 @@ def blur(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
     return blurred
 
 
-def blur_video(frames: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+def blur_video(frames, kernel):
+    """Blur each frame in a video.
+    Params:
+        frames (np.ndarray): (N,H,W) or (N,H,W,3) video.
+        kernel (np.ndarray): 1D blur kernel.
+    Returns:
+        np.ndarray: Blurred video, same shape as input.
+    """
     blurred_frames = np.zeros_like(frames)
     for i in range(frames.shape[0]):
         blurred_frames[i] = blur(frames[i], kernel)
     return blurred_frames
 
 
-def build_matrix(u: float, v: float, theta: float) -> np.ndarray:
+def build_matrix(u, v, theta):
+    """Build 3x3 rigid transform matrix for (u,v,theta).
+    Params:
+        u (float): X translation.
+        v (float): Y translation.
+        theta (float): Rotation (radians).
+    Returns:
+        np.ndarray: (3,3) homogeneous transform matrix.
+    """
     c, s = np.cos(theta), np.sin(theta)
     return np.array([[c, -s, u], [s, c, v], [0.0, 0.0, 1.0]], dtype=np.float64)
 
 
-def _blur_single_channel(img: np.ndarray, kernel: np.ndarray) -> np.ndarray:
+def _blur_single_channel(img, kernel):
+    """Blur a single-channel image using separable 1D convolutions.
+    Params:
+        img (np.ndarray): (H,W) image.
+        kernel (np.ndarray): 1D kernel.
+    Returns:
+        np.ndarray: Blurred image.
+    """
     tmp = convolve1d(img, kernel, axis=1, mode="nearest")
     return convolve1d(tmp, kernel, axis=0, mode="nearest")
 
 
-def _lucas_kanade_optimization(
-        I1: np.ndarray,
-        I2: np.ndarray,
-        border_cut: int,
-        u: float = 0.0,
-        v: float = 0.0,
-        theta: float = 0.0,
-        max_iter=15, epsilon=1e-2) -> Tuple[float, float, float]:
+def _lucas_kanade_optimization(I1, I2, border_cut, u=0.0, v=0.0, theta=0.0,
+                               max_iter=15, epsilon=1e-2):
+    """Lucas-Kanade optimization for translation + small rotation.
+    Params:
+        I1 (np.ndarray): Reference grayscale image (H,W).
+        I2 (np.ndarray): Target grayscale image (H,W).
+        border_cut (int): Ignore a border of this many pixels.
+        u (float): Initial x translation.
+        v (float): Initial y translation.
+        theta (float): Initial rotation (radians).
+        max_iter (int): Max iterations.
+        epsilon (float): Convergence threshold.
+    Returns:
+        tuple[float, float, float]: (u, v, theta) alignment from I2 to I1.
+    """
     kernel_x = np.array([[1.0, 0.0, -1.0]]) / 2.0
     kernel_y = kernel_x.T
     Ix = signal.convolve2d(I1, kernel_x, mode="same", boundary="symm")
@@ -188,37 +252,18 @@ def _lucas_kanade_optimization(
     return u, v, theta
 
 
-def _ensure_rgb(frame: np.ndarray) -> np.ndarray:
-    """
-    Ensures that the input frame is in RGB format.
-
-    Parameters:
-        frame (np.ndarray): The input image or video frame. It can be:
-            - Grayscale (2D array of shape (H, W))
-            - RGB (3D array of shape (H, W, 3))
-            - RGBA (3D array of shape (H, W, 4))
-
-    Returns:
-        np.ndarray: The frame converted to RGB format:
-            - Grayscale frames are converted to RGB by duplicating the single channel.
-            - RGBA frames are converted to RGB by discarding the alpha channel.
-            - RGB frames are returned unchanged.
-    """
-    if frame.ndim == 2:
-        return np.repeat(frame[:, :, None], repeats=3, axis=2)
-    if frame.shape[2] == 4:
-        return frame[:, :, :3]
-    return frame
-
-
 # TODO: fix!
-def _anchor_convergence(
-        transforms: Sequence[np.ndarray],
-        convergence_point: Tuple[float, float],
-) -> List[np.ndarray]:
+def _anchor_convergence(transforms, convergence_point):
+    """Adjust transforms to keep a convergence point fixed.
+    Params:
+        transforms (Sequence[np.ndarray]): Sequence of (3,3) transforms.
+        convergence_point (tuple[float,float]): (x,y) point.
+    Returns:
+        list[np.ndarray]: Anchored transforms.
+    """
     anchor = np.array([convergence_point[0], convergence_point[1], 1.0])
     ref = anchor.copy()
-    anchored: List[np.ndarray] = []
+    anchored = []
     for T in transforms:
         warped = T @ anchor
         warped /= warped[2]
@@ -231,17 +276,22 @@ def _anchor_convergence(
     return anchored
 
 
-def _estimate_strip_width(
-        transforms: Sequence[np.ndarray],
-        idx: int,
-        target_center: int,
-        frame_h: int,
-        frame_w: int,
-        strip_padding: int,
-        T_offset: np.ndarray,
-) -> int:
+def _estimate_strip_width(transforms, idx, target_center, frame_h, frame_w,
+                          strip_padding, T_offset):
+    """Estimate strip width based on local horizontal motion.
+    Params:
+        transforms (Sequence[np.ndarray]): Per-frame (3,3) transforms.
+        idx (int): Frame index.
+        target_center (int): Strip center x (in source frame coords).
+        frame_h (int): Frame height.
+        frame_w (int): Frame width.
+        strip_padding (int): Extra pixels to add.
+        T_offset (np.ndarray): (3,3) offset transform to canvas coords.
+    Returns:
+        int: Strip width in pixels.
+    """
     ys = [0.0, frame_h / 2.0, float(frame_h)]
-    dists: List[float] = []
+    dists = []
 
     if len(transforms) == 1:
         return frame_w
@@ -271,11 +321,16 @@ def _estimate_strip_width(
 "------------------------------------------------------------------------------"
 
 
-def compute_motion(frames_rgb, border_cut, use_bottom_part: bool = True):
-    """
-    Calculates motion between consecutive frames.
-    If use_bottom_part=True, motion is estimated only from the bottom part of frame.
-    Returns a list of (u, v, theta) tuples.
+def compute_motion(frames_rgb, border_cut, use_bottom_part=True):
+    """Compute motion between consecutive frames.
+
+    Params:
+        frames_rgb (np.ndarray): Video frames (N,H,W,3) float in [0,1].
+        border_cut (int): Border cut for LK.
+        use_bottom_part (bool): If True uses only bottom 2/3 of frame.
+
+    Returns:
+        list[tuple[float,float,float]]: [(u,v,theta)] for each pair i->i+1.
     """
     motion_data = []
 
@@ -301,8 +356,13 @@ def compute_motion(frames_rgb, border_cut, use_bottom_part: bool = True):
 
 
 def stabilize_video(frames_rgb, motion_data, enable_rotation=True):
-    """
-    Stabilize rotations and Y-axis translations
+    """Stabilize rotations and Y translations across the video.
+    Params:
+        frames_rgb (np.ndarray): (N,H,W,3) frames.
+        motion_data (list[tuple[float,float,float]]): Per-pair motion.
+        enable_rotation (bool): If True apply theta stabilization.
+    Returns:
+        np.ndarray: Stabilized frames (N,H,W,3).
     """
     stabilized_frames = [frames_rgb[0]]
     current_v = 0.0
@@ -324,8 +384,12 @@ def stabilize_video(frames_rgb, motion_data, enable_rotation=True):
 
 
 def compute_camera_path(motion_data, convergence_point=None):
-    """
-    Compute the camera path as a list of transformation matrices.
+    """Compose per-frame camera transforms from motion tuples.
+    Params:
+        motion_data (Sequence[tuple[float,float,float]]): (u,v,theta) per step.
+        convergence_point (tuple[float,float] | None): Optional anchor point.
+    Returns:
+        list[np.ndarray]: Per-frame (3,3) transforms.
     """
     transforms = [np.eye(3)]
     current_T = np.eye(3)
@@ -335,12 +399,6 @@ def compute_camera_path(motion_data, convergence_point=None):
         current_T = current_T @ M
         transforms.append(current_T)
 
-    # todo: fix this !
-    # mid_idx = len(transforms) // 2
-    # mid_inv = np.linalg.inv(transforms[mid_idx])
-    #
-    # transforms = [mid_inv @ T for T in transforms]
-
     # Convergence Point Logic (אם קיים)
     if convergence_point is not None:
         transforms = _anchor_convergence(transforms, convergence_point)
@@ -348,11 +406,15 @@ def compute_camera_path(motion_data, convergence_point=None):
     return transforms
 
 
-def compute_canvas_geometry(
-        transforms: Sequence[np.ndarray],
-        frame_h: int,
-        frame_w: int,
-) -> Tuple[int, int, float, float]:
+def compute_canvas_geometry(transforms, frame_h, frame_w):
+    """Compute panorama canvas size and offset so all warped frames fit.
+    Params:
+        transforms (Sequence[np.ndarray]): Per-frame (3,3) transforms.
+        frame_h (int): Frame height.
+        frame_w (int): Frame width.
+    Returns:
+        tuple[int,int,float,float]: (canvas_h, canvas_w, dx, dy).
+    """
     corners = np.array(
         [
             [0.0, 0.0, 1.0],
@@ -382,16 +444,23 @@ def compute_canvas_geometry(
     return canvas_h, canvas_w, dx, dy
 
 
-def render_strip_panorama(
-        frames: np.ndarray,
-        transforms: Sequence[np.ndarray],
-        canvas_geometry: Tuple[int, int, float, float],
-        strip_anchor: float = 0.5,
-        strip_padding: int = 2,
-        grayscale_out: bool = False,
-        interp_order: int = 1,
-        prefilter: bool = False,
-) -> np.ndarray:
+def render_strip_panorama(frames, transforms, canvas_geometry,
+                          strip_anchor=0.5, strip_padding=2,
+                          grayscale_out=False, interp_order=1,
+                          prefilter=False):
+    """Render a strip-based panorama.
+    Params:
+        frames (np.ndarray): (N,H,W,3) or (N,H,W) frames.
+        transforms (Sequence[np.ndarray]): (3,3) transform per frame.
+        canvas_geometry (tuple[int,int,float,float]): (canvas_h, canvas_w, dx, dy).
+        strip_anchor (float): Strip center position in [0,1].
+        strip_padding (int): Extra strip width padding.
+        grayscale_out (bool): If True output (H,W), else (H,W,3).
+        interp_order (int): Interpolation order for map_coordinates.
+        prefilter (bool): Prefilter flag for map_coordinates.
+    Returns:
+        np.ndarray: Panorama canvas (float64). Shape depends on grayscale_out.
+    """
     if frames.ndim not in (3, 4):
         raise ValueError("frames must be (N,H,W,3) or (N,H,W)")
     if frames.ndim == 4 and frames.shape[-1] != 3:
@@ -481,23 +550,18 @@ def render_strip_panorama(
 
         if grayscale_out:
             src_frame = rgb2gray(frame) if frame.ndim == 3 else frame
-            sampled = map_coordinates(
-                src_frame,
-                [src_y_grid, src_x_grid],
-                order=interp_order,
-                prefilter=prefilter,
-            )
+            sampled = map_coordinates(src_frame, [src_y_grid, src_x_grid],
+                                      order=interp_order,
+                                      prefilter=prefilter)
             target = pano_canvas[min_y:max_y, min_x:max_x]
             target[mask_grid] = sampled[mask_grid]
             pano_canvas[min_y:max_y, min_x:max_x] = target
         else:
             for ch in range(3):
-                sampled = map_coordinates(
-                    frame[..., ch],
-                    [src_y_grid, src_x_grid],
-                    order=interp_order,
-                    prefilter=prefilter,
-                )
+                sampled = map_coordinates(frame[..., ch],
+                                          [src_y_grid, src_x_grid],
+                                          order=interp_order,
+                                          prefilter=prefilter)
                 target = pano_canvas[min_y:max_y, min_x:max_x, ch]
                 target[mask_grid] = sampled[mask_grid]
                 pano_canvas[min_y:max_y, min_x:max_x, ch] = target
@@ -507,11 +571,15 @@ def render_strip_panorama(
     return pano_canvas
 
 
-def align_pair(
-        im1: np.ndarray,
-        im2: np.ndarray,
-        border_cut: int,
-) -> Tuple[float, float, float]:
+def align_pair(im1, im2, border_cut):
+    """Align two grayscale frames using a coarse-to-fine LK scheme.
+    Params:
+        im1 (np.ndarray): (H,W) reference.
+        im2 (np.ndarray): (H,W) target.
+        border_cut (int): Border cut for LK.
+    Returns:
+        tuple[float,float,float]: (u,v,theta).
+    """
     min_dim = min(im1.shape[:2])
     levels = max(1, int(np.floor(np.log2(min_dim / MIN_PYRAMID_SIZE))) + 1)
     pyr1 = gaussian_pyramid(im1, levels)
@@ -567,86 +635,14 @@ def dynamic_mosaic(frames, transforms, canvas,
     return movie_frames
 
 
-# TODO: test this. or remove if not needed.
-def crop_panoramas_to_common_area(panoramas):
-    """
-    Implements Instruction 6: Neutralize the shift between panoramas.
-    We find the common valid area across all panoramas and crop them.
-    Since panoramas are mainly shifted horizontally, we focus on X cropping.
-    """
-    if not panoramas:
-        return panoramas
-
-    # Assuming all panoramas have the same height and mostly align vertically
-    # We need to find the "valid" width range.
-
-    # Heuristic:
-    # The strip shift causes the image content to shift.
-    # We want to keep the center intersection.
-
-    h, w = panoramas[0].shape[:2]
-
-    # In a proper stitching, usually:
-    # Frame 0 (Leftmost strip) has valid pixels starting early but ending early.
-    # Frame N (Rightmost strip) has valid pixels starting late but ending late.
-
-    # Simple approach based on the instructions:
-    # "Crop right columns from right panorama, left columns from left panorama"
-
-    # Let's find the first non-black column of the Last Panorama (Rightmost view)
-    # and the last non-black column of the First Panorama (Leftmost view).
-
-    # Note: This depends on how your 'render' outputs the black background.
-    # Assuming standard output where background is 0.
-
-    # Find Left Crop limit (determined by the Rightmost View, which starts latest)
-    # Actually, visual parallax works inversely to strip selection:
-    # Left Strip = Right Viewpoint (Content moves Left)
-    # Right Strip = Left Viewpoint (Content moves Right)
-
-    # Let's keep it simple: Find the max 'first_col' and min 'last_col' across all frames
-
-    max_first_col = 0
-    min_last_col = w
-
-    for pan in panoramas:
-        # Convert to gray just for check
-        if pan.ndim == 3:
-            check_img = pan.mean(axis=2)
-        else:
-            check_img = pan
-
-        # Sum columns to find where data exists
-        col_sums = check_img.sum(axis=0)
-        valid_cols = np.where(col_sums > 0)[0]
-
-        if len(valid_cols) > 0:
-            first_col = valid_cols[0]
-            last_col = valid_cols[-1]
-
-            max_first_col = max(max_first_col, first_col)
-            min_last_col = min(min_last_col, last_col)
-
-    # Check if we have a valid overlap
-    if max_first_col >= min_last_col:
-        print("Warning: No common overlap found. Returning original frames.")
-        return panoramas
-
-    print(
-        f"Cropping panoramas to common width: {max_first_col} to {min_last_col}")
-
-    cropped_panoramas = []
-    for pan in panoramas:
-        cropped_panoramas.append(pan[:, max_first_col:min_last_col])
-
-    return cropped_panoramas
-
-
-def crop_black_columns(img: np.ndarray, black_thresh: int = 0,
-                       margin: int = 0) -> np.ndarray:
-    """
-    Crop ONLY fully-black columns from left/right.
-    A column is considered black if ALL its pixels are <= black_thresh (across channels).
+def crop_black_columns(img, black_thresh=0, margin=0):
+    """Crop ONLY fully-black columns from left/right.
+    Params:
+        img (np.ndarray): (H,W) or (H,W,3) image.
+        black_thresh (float): Pixels <= threshold are considered black.
+        margin (int): Keep this many extra columns beyond detected content.
+    Returns:
+        np.ndarray: Cropped image.
     """
     if img.ndim == 2:
         non_black = img > black_thresh  # (H, W)
@@ -737,10 +733,13 @@ def load_frames_for_test(input_frames_path):
     """
     frames = []
     for filename in sorted(os.listdir(input_frames_path)):
-        if filename.endswith('.jpg'):
+        if filename.endswith(".jpg"):
             frame_path = os.path.join(input_frames_path, filename)
             frame = imageio.v2.imread(frame_path)
-            frame = _ensure_rgb(frame).astype(np.float64) / 255.0
+            if frame.ndim != 3 or frame.shape[2] != 3:
+                raise ValueError(
+                    f"Expected RGB frame (H,W,3), got shape {frame.shape} for {filename}")
+            frame = frame.astype(np.float64) / 255.0
             frames.append(frame)
     if not frames:
         raise ValueError("No frames found in the specified directory.")
