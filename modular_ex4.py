@@ -252,30 +252,6 @@ def _lucas_kanade_optimization(I1, I2, border_cut, u=0.0, v=0.0, theta=0.0,
     return u, v, theta
 
 
-# TODO: fix!
-def _anchor_convergence(transforms, convergence_point):
-    """Adjust transforms to keep a convergence point fixed.
-    Params:
-        transforms (Sequence[np.ndarray]): Sequence of (3,3) transforms.
-        convergence_point (tuple[float,float]): (x,y) point.
-    Returns:
-        list[np.ndarray]: Anchored transforms.
-    """
-    anchor = np.array([convergence_point[0], convergence_point[1], 1.0])
-    ref = anchor.copy()
-    anchored = []
-    for T in transforms:
-        warped = T @ anchor
-        warped /= warped[2]
-        delta_x = warped[0] - ref[0]
-        delta_y = warped[1] - ref[1]
-        adjust = np.eye(3, dtype=np.float64)
-        adjust[0, 2] = -delta_x
-        adjust[1, 2] = -delta_y
-        anchored.append(adjust @ T)
-    return anchored
-
-
 def _estimate_strip_width(transforms, idx, target_center, frame_h, frame_w,
                           strip_padding, T_offset):
     """Estimate strip width based on local horizontal motion.
@@ -383,7 +359,7 @@ def stabilize_video(frames_rgb, motion_data, enable_rotation=True):
     return np.array(stabilized_frames)
 
 
-def compute_camera_path(motion_data, convergence_point=None):
+def compute_cumulative_transforms(motion_data, convergence_point=None):
     """Compose per-frame camera transforms from motion tuples.
     Params:
         motion_data (Sequence[tuple[float,float,float]]): (u,v,theta) per step.
@@ -399,9 +375,10 @@ def compute_camera_path(motion_data, convergence_point=None):
         current_T = current_T @ M
         transforms.append(current_T)
 
-    # Convergence Point Logic (אם קיים)
+    # Convergence Point Logic (Optional)
     if convergence_point is not None:
-        transforms = _anchor_convergence(transforms, convergence_point)
+        pass
+        # transforms = _anchor_convergence(transforms, convergence_point)
 
     return transforms
 
@@ -445,35 +422,28 @@ def compute_canvas_geometry(transforms, frame_h, frame_w):
 
 
 def render_strip_panorama(frames, transforms, canvas_geometry,
-                          strip_anchor=0.5, strip_padding=2,
-                          grayscale_out=False, interp_order=1,
-                          prefilter=False):
-    """Render a strip-based panorama.
+                          strip_anchor=0.5, strip_padding=2, interp_order=1,
+                          prefilter=False, include_edge_full_strip=False):
+    """Render a strip-based panorama (RGB only).
     Params:
-        frames (np.ndarray): (N,H,W,3) or (N,H,W) frames.
+        frames (np.ndarray): (N,H,W,3) frames.
         transforms (Sequence[np.ndarray]): (3,3) transform per frame.
         canvas_geometry (tuple[int,int,float,float]): (canvas_h, canvas_w, dx, dy).
         strip_anchor (float): Strip center position in [0,1].
         strip_padding (int): Extra strip width padding.
-        grayscale_out (bool): If True output (H,W), else (H,W,3).
         interp_order (int): Interpolation order for map_coordinates.
         prefilter (bool): Prefilter flag for map_coordinates.
+        include_edge_full_strip (bool): If True, use full-width strip for first/last frame.
     Returns:
-        np.ndarray: Panorama canvas (float64). Shape depends on grayscale_out.
+        np.ndarray: Panorama canvas (float64) of shape (H,W,3).
     """
-    if frames.ndim not in (3, 4):
-        raise ValueError("frames must be (N,H,W,3) or (N,H,W)")
-    if frames.ndim == 4 and frames.shape[-1] != 3:
-        raise ValueError("RGB frames must have 3 channels")
+    if frames.ndim != 4 or frames.shape[-1] != 3:
+        raise ValueError(f"frames must be (N,H,W,3), got {frames.shape}")
 
     frame_h, frame_w = frames.shape[1:3]
     canvas_h, canvas_w, dy, dx = canvas_geometry
 
-    pano_canvas = (
-        np.zeros((canvas_h, canvas_w), dtype=np.float64)
-        if grayscale_out
-        else np.zeros((canvas_h, canvas_w, 3), dtype=np.float64)
-    )
+    pano_canvas = np.zeros((canvas_h, canvas_w, 3), dtype=np.float64)
 
     T_offset = np.eye(3, dtype=np.float64)
     T_offset[0, 2] = dx
@@ -485,23 +455,18 @@ def render_strip_panorama(frames, transforms, canvas_geometry,
         T_total = T_offset @ transforms[idx]
         T_inv = np.linalg.inv(T_total)
 
-        strip_width = _estimate_strip_width(
-            transforms,
-            idx,
-            target_center,
-            frame_h,
-            frame_w,
-            strip_padding,
-            T_offset,
-        )
+        strip_width = _estimate_strip_width(transforms, idx, target_center,
+                                            frame_h, frame_w, strip_padding,
+                                            T_offset)
 
         strip_start = max(0, target_center - strip_width // 2)
         strip_end = min(frame_w, strip_start + strip_width)
-        # TODO: decide if keep/remove lines below
-        # if idx == 0:
-        #     strip_start = 0
-        # if idx == len(frames) - 1:
-        #     strip_end = frame_w
+
+        if include_edge_full_strip:
+            if idx == 0:
+                strip_start = 0
+            if idx == len(frames) - 1:
+                strip_end = frame_w
 
         strip_corners = np.array(
             [
@@ -523,22 +488,16 @@ def render_strip_panorama(frames, transforms, canvas_geometry,
         if max_x <= min_x or max_y <= min_y:
             continue
 
-        xv, yv = np.meshgrid(
-            np.arange(min_x, max_x, dtype=np.float64),
-            np.arange(min_y, max_y, dtype=np.float64),
-        )
+        xv, yv = np.meshgrid(np.arange(min_x, max_x, dtype=np.float64),
+                             np.arange(min_y, max_y, dtype=np.float64))
         coords = np.stack([xv, yv, np.ones_like(xv)], axis=0).reshape(3, -1)
         src = T_inv @ coords
         src /= src[2, :]
         src_x = src[0, :]
         src_y = src[1, :]
 
-        valid = (
-                (src_x >= 0)
-                & (src_x <= frame_w - 1)
-                & (src_y >= 0)
-                & (src_y <= frame_h - 1)
-        )
+        valid = (src_x >= 0) & (src_x <= frame_w - 1) & (src_y >= 0) & (
+                src_y <= frame_h - 1)
         if not np.any(valid):
             continue
 
@@ -548,23 +507,12 @@ def render_strip_panorama(frames, transforms, canvas_geometry,
         src_y_grid = src_y.reshape(roi_h, roi_w)
         mask_grid = valid.reshape(roi_h, roi_w)
 
-        if grayscale_out:
-            src_frame = rgb2gray(frame) if frame.ndim == 3 else frame
-            sampled = map_coordinates(src_frame, [src_y_grid, src_x_grid],
-                                      order=interp_order,
-                                      prefilter=prefilter)
-            target = pano_canvas[min_y:max_y, min_x:max_x]
+        for ch in range(3):
+            sampled = map_coordinates(frame[..., ch], [src_y_grid, src_x_grid],
+                                      order=interp_order, prefilter=prefilter)
+            target = pano_canvas[min_y:max_y, min_x:max_x, ch]
             target[mask_grid] = sampled[mask_grid]
-            pano_canvas[min_y:max_y, min_x:max_x] = target
-        else:
-            for ch in range(3):
-                sampled = map_coordinates(frame[..., ch],
-                                          [src_y_grid, src_x_grid],
-                                          order=interp_order,
-                                          prefilter=prefilter)
-                target = pano_canvas[min_y:max_y, min_x:max_x, ch]
-                target[mask_grid] = sampled[mask_grid]
-                pano_canvas[min_y:max_y, min_x:max_x, ch] = target
+            pano_canvas[min_y:max_y, min_x:max_x, ch] = target
 
     # Crop fully-black columns (left/right) before converting to uint8
     pano_canvas = crop_black_columns(pano_canvas, black_thresh=0, margin=10)
@@ -597,9 +545,9 @@ def align_pair(im1, im2, border_cut):
     return u, v, theta
 
 
-def dynamic_mosaic(frames, transforms, canvas,
-                   padding=2, grayscale=False,
-                   start=0.2, stop=0.8, num_views=10, back_n_forth=False):
+def dynamic_mosaic(frames, transforms, canvas, padding=2, start=0.2, stop=0.8,
+                   num_views=10, back_n_forth=False,
+                   include_edge_full_strip=False):
     """
     Create a dynamic mosaic video by rendering strip panoramas with varying strip anchors.
     Args:
@@ -607,25 +555,20 @@ def dynamic_mosaic(frames, transforms, canvas,
         transforms (List[np.ndarray]): List of 3x3 transformation matrices for each frame.
         canvas (Tuple[int, int, float, float]): Canvas geometry as returned by compute_canvas_geometry.
         padding (int): Padding to add to the strip width.
-        grayscale (bool): Whether to output grayscale panoramas.
         start (float): Starting anchor position (0.0 to 1.0).
         stop (float): Ending anchor position (0.0 to 1.0).
         num_views (int): Number of frames to generate between start and stop.
         back_n_forth (bool): If True, the video will play forward and then backward.
     Returns:
-        List[np.ndarray]: List of panorama frames as uint8 arrays.
-        :param back_n_forth:
+        :param frames: List of panorama frames as uint8 arrays.
     """
     movie_frames = []
 
     for anchor in np.linspace(start, stop, num_views):
         print(f"Creating panorama for anchor {anchor:.2f}...")
-
         pan = render_strip_panorama(frames, transforms, canvas,
-                                    strip_anchor=anchor,
-                                    strip_padding=padding,
-                                    grayscale_out=grayscale)
-
+                                    strip_anchor=anchor, strip_padding=padding,
+                                    include_edge_full_strip=include_edge_full_strip)
         pan_uint8 = (np.clip(pan, 0, 1) * 255).astype(np.uint8)
         movie_frames.append(pan_uint8)
 
@@ -681,9 +624,9 @@ def generate_panorama(input_frames_path, n_out_frames):
     each list item should be a PIL image of a generated panorama.
     """
     PADDING = 4
-    GRAYSCALE = False
     BORDER_CUT = 15
     ENABLE_ROTATION = False
+    INCLUDE_EDGE_FULL_STRIP = False
     NUM_OF_BLURS = 1
     START_ANCHOR = 0.2  # Safe margins
     STOP_ANCHOR = 0.8
@@ -696,7 +639,7 @@ def generate_panorama(input_frames_path, n_out_frames):
     # 1. Compute Motion
     motion_data = compute_motion(raw_frames, BORDER_CUT)
 
-    # 1.1 invert if motion is right-to-left
+    # 1.2 invert if motion is right-to-left
     if estimate_motion_dir(motion_data) == "RTL":
         raw_frames = raw_frames[::-1]
         motion_data = [(-u, -v, -theta) for u, v, theta in motion_data[::-1]]
@@ -707,20 +650,16 @@ def generate_panorama(input_frames_path, n_out_frames):
 
     # 3. Compute Path for motion composition: align all frames to same coordinate system
     stabilized_motion = [(u, 0, 0) for u, v, theta in motion_data]
-    transforms = compute_camera_path(stabilized_motion)
+    transforms = compute_cumulative_transforms(stabilized_motion)
     geo = compute_canvas_geometry(transforms, raw_frames.shape[1],
                                   raw_frames.shape[2])
 
     # 4. Create Movie of Multi-Perspective mosaics
-    movie_frames = dynamic_mosaic(
-        stable_frames, transforms, geo,
-        num_views=n_out_frames,
-        start=START_ANCHOR,
-        stop=STOP_ANCHOR,
-        padding=PADDING,
-        grayscale=GRAYSCALE,
-        back_n_forth=True
-    )
+    movie_frames = dynamic_mosaic(stable_frames, transforms, geo,
+                                  padding=PADDING,
+                                  include_edge_full_strip=INCLUDE_EDGE_FULL_STRIP,
+                                  start=START_ANCHOR, stop=STOP_ANCHOR,
+                                  num_views=n_out_frames, back_n_forth=True)
 
     return [PIL.Image.fromarray(f) for f in movie_frames]
 
@@ -751,7 +690,3 @@ def load_frames_for_test(input_frames_path):
 #            are in same distance from camera
 #        b. translation: with LK on the ROTATED frames
 #  - set middle frame as the reference for stabilization
-
-# todo - OPTIMIZE RUNTIME to ~100sec
-#  - remove loops, use numpy vector operations,
-#           reduce write/any access to disk
