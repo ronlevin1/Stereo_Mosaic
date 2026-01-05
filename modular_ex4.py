@@ -545,37 +545,25 @@ def align_pair(im1, im2, border_cut):
     return u, v, theta
 
 
-def dynamic_mosaic(frames, transforms, canvas, padding=2, start=0.2, stop=0.8,
-                   num_views=10, back_n_forth=False,
-                   include_edge_full_strip=False):
+def load_frames_for_test(input_frames_path):
     """
-    Create a dynamic mosaic video by rendering strip panoramas with varying strip anchors.
-    Args:
-        frames (np.ndarray): Input video frames of shape (N, H, W, 3) or (N, H, W).
-        transforms (List[np.ndarray]): List of 3x3 transformation matrices for each frame.
-        canvas (Tuple[int, int, float, float]): Canvas geometry as returned by compute_canvas_geometry.
-        padding (int): Padding to add to the strip width.
-        start (float): Starting anchor position (0.0 to 1.0).
-        stop (float): Ending anchor position (0.0 to 1.0).
-        num_views (int): Number of frames to generate between start and stop.
-        back_n_forth (bool): If True, the video will play forward and then backward.
-    Returns:
-        :param frames: List of panorama frames as uint8 arrays.
+    Load video frames from a directory for testing purposes.
+    :param input_frames_path: Path to the directory containing video frames.
+    :return: A numpy array of loaded video frames.
     """
-    movie_frames = []
-
-    for anchor in np.linspace(start, stop, num_views):
-        print(f"Creating panorama for anchor {anchor:.2f}...")
-        pan = render_strip_panorama(frames, transforms, canvas,
-                                    strip_anchor=anchor, strip_padding=padding,
-                                    include_edge_full_strip=include_edge_full_strip)
-        pan_uint8 = (np.clip(pan, 0, 1) * 255).astype(np.uint8)
-        movie_frames.append(pan_uint8)
-
-    # append all frames in reverse order to create a back-and-forth effect
-    if back_n_forth:
-        movie_frames += movie_frames[::-1]
-    return movie_frames
+    frames = []
+    for filename in sorted(os.listdir(input_frames_path)):
+        if filename.endswith(".jpg"):
+            frame_path = os.path.join(input_frames_path, filename)
+            frame = imageio.v2.imread(frame_path)
+            if frame.ndim != 3 or frame.shape[2] != 3:
+                raise ValueError(
+                    f"Expected RGB frame (H,W,3), got shape {frame.shape} for {filename}")
+            frame = frame.astype(np.float64) / 255.0
+            frames.append(frame)
+    if not frames:
+        raise ValueError("No frames found in the specified directory.")
+    return np.stack(frames, axis=0)
 
 
 def crop_black_columns(img, black_thresh=0, margin=0):
@@ -613,6 +601,39 @@ def crop_black_columns(img, black_thresh=0, margin=0):
     return img[:, x0:x1, :]
 
 
+def dynamic_mosaic(frames, transforms, canvas, padding=2, start=0.2, stop=0.8,
+                   num_views=10, back_n_forth=False,
+                   include_edge_full_strip=False):
+    """
+    Create a dynamic mosaic video by rendering strip panoramas with varying strip anchors.
+    Args:
+        frames (np.ndarray): Input video frames of shape (N, H, W, 3) or (N, H, W).
+        transforms (List[np.ndarray]): List of 3x3 transformation matrices for each frame.
+        canvas (Tuple[int, int, float, float]): Canvas geometry as returned by compute_canvas_geometry.
+        padding (int): Padding to add to the strip width.
+        start (float): Starting anchor position (0.0 to 1.0).
+        stop (float): Ending anchor position (0.0 to 1.0).
+        num_views (int): Number of frames to generate between start and stop.
+        back_n_forth (bool): If True, the video will play forward and then backward.
+    Returns:
+        :param frames: List of panorama frames as uint8 arrays.
+    """
+    movie_frames = []
+
+    for anchor in np.linspace(start, stop, num_views):
+        print(f"Creating panorama for anchor {anchor:.2f}...")
+        pan = render_strip_panorama(frames, transforms, canvas,
+                                    strip_anchor=anchor, strip_padding=padding,
+                                    include_edge_full_strip=include_edge_full_strip)
+        pan_uint8 = (np.clip(pan, 0, 1) * 255).astype(np.uint8)
+        movie_frames.append(pan_uint8)
+
+    # append frames in reverse order to create a back-and-forth effect
+    if back_n_forth:
+        movie_frames += movie_frames[::-1]
+    return movie_frames
+
+
 def generate_panorama(input_frames_path, n_out_frames):
     """
     Main entry point for ex4
@@ -647,9 +668,9 @@ def generate_panorama(input_frames_path, n_out_frames):
     # 2. Stabilize Video
     stable_frames = stabilize_video(raw_frames, motion_data,
                                     enable_rotation=ENABLE_ROTATION)
-
-    # 3. Compute Path for motion composition: align all frames to same coordinate system
     stabilized_motion = [(u, 0, 0) for u, v, theta in motion_data]
+
+    # 3. Motion composition: align all frames to same coordinate system
     transforms = compute_cumulative_transforms(stabilized_motion)
     geo = compute_canvas_geometry(transforms, raw_frames.shape[1],
                                   raw_frames.shape[2])
@@ -662,27 +683,6 @@ def generate_panorama(input_frames_path, n_out_frames):
                                   num_views=n_out_frames, back_n_forth=True)
 
     return [PIL.Image.fromarray(f) for f in movie_frames]
-
-
-def load_frames_for_test(input_frames_path):
-    """
-    Load video frames from a directory for testing purposes.
-    :param input_frames_path: Path to the directory containing video frames.
-    :return: A numpy array of loaded video frames.
-    """
-    frames = []
-    for filename in sorted(os.listdir(input_frames_path)):
-        if filename.endswith(".jpg"):
-            frame_path = os.path.join(input_frames_path, filename)
-            frame = imageio.v2.imread(frame_path)
-            if frame.ndim != 3 or frame.shape[2] != 3:
-                raise ValueError(
-                    f"Expected RGB frame (H,W,3), got shape {frame.shape} for {filename}")
-            frame = frame.astype(np.float64) / 255.0
-            frames.append(frame)
-    if not frames:
-        raise ValueError("No frames found in the specified directory.")
-    return np.stack(frames, axis=0)
 
 # TODO:
 #  - split LK to rotation and translation components
