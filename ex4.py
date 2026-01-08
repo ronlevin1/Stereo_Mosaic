@@ -683,3 +683,9 @@ def generate_panorama(input_frames_path, n_out_frames):
                                   num_views=n_out_frames, back_n_forth=True)
 
     return [PIL.Image.fromarray(f) for f in movie_frames]
+
+# tar file of video cmd:
+# tar -cvf videos.tar viewpoint_input.mp4 viewpoint_result.mp4 good_input.mp4 good_result.mp4 bad_input.mp4 bad_result.mp4
+
+# code file tar cmd:
+# tar -cvf ex4.tar ex4.py requirements.txt

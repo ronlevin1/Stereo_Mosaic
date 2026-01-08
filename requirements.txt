@@ -1,0 +1,6 @@
+numpy
+scipy
+imageio
+Pillow
+scikit-image
+
