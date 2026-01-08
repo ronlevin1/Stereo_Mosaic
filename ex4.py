@@ -683,10 +683,3 @@ def generate_panorama(input_frames_path, n_out_frames):
                                   num_views=n_out_frames, back_n_forth=True)
 
     return [PIL.Image.fromarray(f) for f in movie_frames]
-
-# TODO:
-#  - split LK to rotation and translation components
-#        a. rotation: with SIFT+RANSAC on horizontal lines\features, since they
-#            are in same distance from camera
-#        b. translation: with LK on the ROTATED frames
-#  - set middle frame as the reference for stabilization
