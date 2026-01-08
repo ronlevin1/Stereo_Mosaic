@@ -57,10 +57,10 @@ def estimate_motion_dir(motion_data):
     is_right_to_left = avg_u > 0
 
     if is_right_to_left:
-        print("Right-to-Left motion detected. Flipping data internally...")
+        # print("Right-to-Left motion detected. Flipping data internally...")
         return "RTL"
     else:
-        print("Left-to-Right motion detected.")
+        # print("Left-to-Right motion detected.")
         return "LTR"
 
 
@@ -621,7 +621,7 @@ def dynamic_mosaic(frames, transforms, canvas, padding=2, start=0.2, stop=0.8,
     movie_frames = []
 
     for anchor in np.linspace(start, stop, num_views):
-        print(f"Creating panorama for anchor {anchor:.2f}...")
+        # print(f"Creating panorama for anchor {anchor:.2f}...")
         pan = render_strip_panorama(frames, transforms, canvas,
                                     strip_anchor=anchor, strip_padding=padding,
                                     include_edge_full_strip=include_edge_full_strip)
@@ -680,7 +680,7 @@ def generate_panorama(input_frames_path, n_out_frames):
                                   padding=PADDING,
                                   include_edge_full_strip=INCLUDE_EDGE_FULL_STRIP,
                                   start=START_ANCHOR, stop=STOP_ANCHOR,
-                                  num_views=n_out_frames, back_n_forth=True)
+                                  num_views=n_out_frames, back_n_forth=False)
 
     return [PIL.Image.fromarray(f) for f in movie_frames]
 
